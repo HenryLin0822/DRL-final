@@ -1,0 +1,1 @@
+python3 train_vae.py --epochs 100 --batch-size 256

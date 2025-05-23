@@ -1,3 +1,0 @@
-DEF run m( move WHILE c( noMarkersPresent c) w( move move turnLeft w) move turnLeft m)
-DEF run m( move WHILE c( noMarkersPresent c) w( move move turnLeft w) m)
-DEF run m( move WHILE c( noMarkersPresent c) w( move move turnLeft w) move turnLeft m)
