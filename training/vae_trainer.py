@@ -752,10 +752,10 @@ class HPRLVAETrainer:
                 if epoch % self.config.get('save_interval', 10) == 0 or is_best:
                     self.save_checkpoint(epoch, is_best)
                 
-                # Early stopping check
+                '''# Early stopping check
                 if self._should_early_stop():
                     self.logger.info("Early stopping triggered")
-                    break
+                    break'''
         
         except KeyboardInterrupt:
             self.logger.info("Training interrupted by user")
