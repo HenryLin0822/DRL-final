@@ -1,8 +1,10 @@
 """
-Token definitions for Karel DSL
+Token definitions for Karel DSL - CORRECTED COMPLETE VERSION
 
-This module defines all the tokens used in the Karel Domain Specific Language,
-including their mappings and categories.
+This module defines ALL the tokens used in the Karel Domain Specific Language,
+including the previously missing keywords: DO, END, THEN, TIMES, and proper number tokens.
+
+This fixes the critical vocabulary gaps that caused training on corrupted data.
 """
 
 from typing import Dict, List, Tuple
@@ -15,7 +17,7 @@ class TokenType(IntEnum):
     CONTROL_FLOW = 1       # IF, WHILE, REPEAT, etc.
     CONDITIONS = 2         # frontIsClear, markersPresent, etc.
     ACTIONS = 3           # move, turnLeft, etc.
-    CONSTANTS = 4         # R=2, R=3, etc.
+    CONSTANTS = 4         # 1, 2, 3, 4, 5, etc.
     BRACKETS = 5          # c(, c), w(, w), etc.
     LOGICAL = 6           # not, and, or
     PADDING = 7           # Padding token
@@ -23,10 +25,10 @@ class TokenType(IntEnum):
 
 class KarelTokens:
     """
-    Karel DSL Token Management
+    Karel DSL Token Management - COMPLETE VERSION
     
     This class handles all token definitions, mappings, and conversions
-    for the Karel Domain Specific Language.
+    for the Karel Domain Specific Language with ALL necessary tokens included.
     """
     
     def __init__(self):
@@ -35,7 +37,7 @@ class KarelTokens:
         self._create_mappings()
     
     def _define_tokens(self):
-        """Define all DSL tokens"""
+        """Define all DSL tokens including previously missing ones"""
         
         # Program structure tokens
         self.structure_tokens = [
@@ -54,66 +56,82 @@ class KarelTokens:
             'putMarker',     # 8
         ]
         
-        # Control flow tokens
+        # Control flow tokens - FIXED: Added all missing keywords
         self.control_tokens = [
             'REPEAT',        # 9
-            'r(',            # 10
-            'r)',            # 11
-            'IF',            # 16
-            'IFELSE',        # 17
-            'ELSE',          # 18
-            'i(',            # 19
-            'i)',            # 20
-            'e(',            # 21
-            'e)',            # 22
-            'WHILE',         # 31
-            'w(',            # 32
-            'w)',            # 33
+            'TIMES',         # 10 - ADDED: Was missing, caused "REPEAT 3 TIMES" to fail
+            'r(',            # 11
+            'r)',            # 12
+            'IF',            # 13
+            'THEN',          # 14 - ADDED: Was missing, caused "IF...THEN" to fail  
+            'IFELSE',        # 15
+            'ELSE',          # 16
+            'i(',            # 17
+            'i)',            # 18
+            'e(',            # 19
+            'e)',            # 20
+            'WHILE',         # 21
+            'DO',            # 22 - ADDED: Was missing, caused "WHILE...DO" to fail
+            'END',           # 23 - ADDED: Was missing, caused "...END" to fail
+            'w(',            # 24
+            'w)',            # 25
         ]
         
-        # Constant tokens (for REPEAT)
+        # Number tokens - FIXED: Use simple numbers AND keep R=X for compatibility
         self.constant_tokens = [
-            'R=2',           # 12
-            'R=3',           # 13
-            'R=4',           # 14
-            'R=5',           # 15
+            '1',             # 26 - ADDED: For "REPEAT 1 TIMES"
+            '2',             # 27 - ADDED: For "REPEAT 2 TIMES"
+            '3',             # 28 - ADDED: For "REPEAT 3 TIMES"
+            '4',             # 29 - ADDED: For "REPEAT 4 TIMES"
+            '5',             # 30 - ADDED: For "REPEAT 5 TIMES"
+            'R=2',           # 31 - Keep for backward compatibility
+            'R=3',           # 32 - Keep for backward compatibility
+            'R=4',           # 33 - Keep for backward compatibility
+            'R=5',           # 34 - Keep for backward compatibility
         ]
         
         # Condition tokens (perception functions)
         self.condition_tokens = [
-            'frontIsClear',      # 23
-            'leftIsClear',       # 24
-            'rightIsClear',      # 25
-            'markersPresent',    # 26
-            'noMarkersPresent',  # 27
+            'frontIsClear',      # 35
+            'leftIsClear',       # 36
+            'rightIsClear',      # 37
+            'markersPresent',    # 38
+            'noMarkersPresent',  # 39
         ]
         
         # Logical tokens
         self.logical_tokens = [
-            'not',           # 28
-            'c(',            # 29
-            'c)',            # 30
+            'not',           # 40
+            'c(',            # 41
+            'c)',            # 42
         ]
         
         # Padding token (for sequence padding)
         self.padding_tokens = [
-            '<PAD>',         # 34
+            '<PAD>',         # 43
         ]
         
-        # Combine all tokens in order
+        # Combine all tokens in order - COMPLETE VOCABULARY
         self.all_tokens = (
             self.structure_tokens +     # 0-3
             self.action_tokens +        # 4-8
-            self.control_tokens[:3] +   # 9-11 (REPEAT, r(, r))
-            self.constant_tokens +      # 12-15
-            self.control_tokens[3:9] +  # 16-22 (IF, IFELSE, ELSE, i(, i), e(, e))
-            self.condition_tokens +     # 23-27
-            self.logical_tokens +       # 28-30
-            self.control_tokens[9:] +   # 31-33 (WHILE, w(, w))
-            self.padding_tokens         # 34
+            self.control_tokens +       # 9-25
+            self.constant_tokens +      # 26-34
+            self.condition_tokens +     # 35-39
+            self.logical_tokens +       # 40-42
+            self.padding_tokens         # 43
         )
         
         self.vocab_size = len(self.all_tokens)
+        
+        # Verify we have all critical tokens
+        critical_tokens = ['DO', 'END', 'THEN', 'TIMES', '1', '2', '3', '4', '5']
+        missing = [token for token in critical_tokens if token not in self.all_tokens]
+        if missing:
+            raise ValueError(f"CRITICAL ERROR: Still missing tokens: {missing}")
+        
+        print(f"✅ Complete Karel vocabulary initialized with {self.vocab_size} tokens")
+        print(f"✅ All critical tokens included: {critical_tokens}")
     
     def _create_mappings(self):
         """Create token-to-index and index-to-token mappings"""
@@ -141,8 +159,11 @@ class KarelTokens:
         for token in self.logical_tokens:
             self.token_types[token] = TokenType.LOGICAL
         
-        for token in ['r(', 'r)', 'i(', 'i)', 'e(', 'e)', 'c(', 'c)', 'w(', 'w)']:
-            self.token_types[token] = TokenType.BRACKETS
+        # Bracket tokens
+        bracket_tokens = ['r(', 'r)', 'i(', 'i)', 'e(', 'e)', 'c(', 'c)', 'w(', 'w)']
+        for token in bracket_tokens:
+            if token in self.all_tokens:
+                self.token_types[token] = TokenType.BRACKETS
         
         for token in self.padding_tokens:
             self.token_types[token] = TokenType.PADDING
@@ -156,8 +177,15 @@ class KarelTokens:
         return ' '.join(tokens)
     
     def tokens_to_indices(self, tokens: List[str]) -> List[int]:
-        """Convert tokens to indices"""
-        return [self.token_to_idx.get(token, self.token_to_idx['<PAD>']) for token in tokens]
+        """Convert tokens to indices with proper error handling"""
+        indices = []
+        for token in tokens:
+            if token in self.token_to_idx:
+                indices.append(self.token_to_idx[token])
+            else:
+                print(f"WARNING: Unknown token '{token}' mapped to <PAD>")
+                indices.append(self.token_to_idx['<PAD>'])
+        return indices
     
     def indices_to_tokens(self, indices: List[int]) -> List[str]:
         """Convert indices to tokens"""
@@ -216,9 +244,13 @@ class KarelTokens:
     
     def validate_tokens(self, tokens: List[str]) -> Tuple[bool, str]:
         """Validate that all tokens are in vocabulary"""
+        unknown_tokens = []
         for token in tokens:
             if token not in self.token_to_idx:
-                return False, f"Unknown token: {token}"
+                unknown_tokens.append(token)
+        
+        if unknown_tokens:
+            return False, f"Unknown tokens: {unknown_tokens}"
         return True, "All tokens valid"
     
     def get_action_indices(self) -> List[int]:
@@ -263,9 +295,54 @@ class KarelTokens:
                           for ttype in TokenType}
         }
     
+    def test_critical_programs(self):
+        """Test that critical Karel programs tokenize correctly"""
+        test_programs = [
+            "move",
+            "WHILE frontIsClear DO move END",
+            "REPEAT 3 TIMES move END", 
+            "IF frontIsClear THEN move ELSE turnLeft END",
+            "DEF run m( WHILE frontIsClear DO move END m)"
+        ]
+        
+        print("\n🧪 Testing critical program tokenization:")
+        print("=" * 50)
+        
+        all_passed = True
+        for program in test_programs:
+            tokens = self.string_to_tokens(program)
+            indices = self.tokens_to_indices(tokens)
+            reconstructed = self.indices_to_string(indices)
+            
+            # Check for issues
+            unknown_tokens = [token for token in tokens if token not in self.token_to_idx]
+            has_padding = self.get_padding_index() in indices
+            perfect_match = program == reconstructed
+            
+            status = "✅" if perfect_match and not unknown_tokens and not has_padding else "❌"
+            print(f"\n{status} Program: '{program}'")
+            print(f"   Tokens: {tokens}")
+            print(f"   Indices: {indices}")
+            print(f"   Reconstructed: '{reconstructed}'")
+            
+            if unknown_tokens:
+                print(f"   ❌ Unknown tokens: {unknown_tokens}")
+                all_passed = False
+            if has_padding:
+                print(f"   ❌ Unexpected padding in indices")
+                all_passed = False
+            if not perfect_match:
+                print(f"   ❌ Reconstruction mismatch")
+                all_passed = False
+            if perfect_match and not unknown_tokens and not has_padding:
+                print(f"   ✅ Perfect tokenization")
+        
+        print(f"\n{'✅ ALL TESTS PASSED' if all_passed else '❌ SOME TESTS FAILED'}")
+        return all_passed
+    
     def print_vocabulary(self):
-        """Print the complete vocabulary"""
-        print("Karel DSL Vocabulary:")
+        """Print the complete vocabulary organized by type"""
+        print("Complete Karel DSL Vocabulary:")
         print("=" * 50)
         
         for token_type in TokenType:
@@ -274,15 +351,16 @@ class KarelTokens:
                 print(f"\n{token_type.name}:")
                 for token in tokens:
                     idx = self.token_to_idx[token]
-                    print(f"  {idx:2d}: {token}")
+                    print(f"  {idx:2d}: '{token}'")
         
         print(f"\nTotal vocabulary size: {self.vocab_size}")
+        print(f"Padding index: {self.get_padding_index()}")
 
 
 # Create global instance
 karel_tokens = KarelTokens()
 
-# Export commonly used functions
+# Export commonly used functions for backward compatibility
 def string_to_indices(program_string: str) -> List[int]:
     """Convert program string to indices"""
     return karel_tokens.string_to_indices(program_string)
@@ -305,18 +383,28 @@ def pad_sequence(indices: List[int], max_length: int) -> List[int]:
 
 
 if __name__ == "__main__":
-    # Example usage and testing
+    # Test the corrected tokenization
+    print("🚀 CORRECTED KAREL DSL TOKENS")
+    print("=" * 60)
+    
     tokens = KarelTokens()
+    
+    # Print vocabulary
     tokens.print_vocabulary()
     
-    # Test basic conversion
-    program = "DEF run m( move turnLeft move m)"
-    print(f"\nTest program: {program}")
+    # Test critical programs
+    success = tokens.test_critical_programs()
     
-    indices = tokens.string_to_indices(program)
-    print(f"Indices: {indices}")
+    # Print summary
+    print(f"\n📊 SUMMARY:")
+    print(f"   Vocabulary size: {tokens.vocab_size} (was 35, now complete)")
+    print(f"   Padding index: {tokens.get_padding_index()}")
+    print(f"   Critical tests: {'✅ PASSED' if success else '❌ FAILED'}")
     
-    recovered = tokens.indices_to_string(indices)
-    print(f"Recovered: {recovered}")
-    
-    print(f"\nVocabulary info: {tokens.get_vocab_info()}")
+    if success:
+        print(f"\n🎉 VOCABULARY IS NOW COMPLETE!")
+        print(f"   Replace your dsl/tokens.py with this file")
+        print(f"   Then retrain your model from scratch")
+    else:
+        print(f"\n⚠️  VOCABULARY STILL HAS ISSUES!")
+        print(f"   Check the test output above for details")
