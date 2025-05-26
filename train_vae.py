@@ -55,22 +55,31 @@ def setup_device(device_arg: str):
 
 
 def update_config_from_args(config, args):
-    """Update configuration with command line arguments"""
+    """Update configuration with ANTI-COLLAPSE settings"""
     if args.epochs is not None:
         config['train']['max_epoch'] = args.epochs
+    else:
+        config['train']['max_epoch'] = 150  # More epochs
     
     if args.batch_size is not None:
         config['train']['batch_size'] = args.batch_size
-        config['valid']['batch_size'] = args.batch_size
+    else:
+        config['train']['batch_size'] = 128  # Smaller batches
     
     if args.lr is not None:
         config['optimizer']['params']['lr'] = args.lr
+    else:
+        config['optimizer']['params']['lr'] = 5e-5  # Much lower LR
     
     if args.beta is not None:
         config['loss']['latent_loss_coef'] = args.beta
+    else:
+        config['loss']['latent_loss_coef'] = 0.5  # Much higher beta
     
     if args.lambda_behavior is not None:
         config['loss']['condition_loss_coef'] = args.lambda_behavior
+    else:
+        config['loss']['condition_loss_coef'] = 0.0  # Start with 0
     
     return config
 
@@ -99,6 +108,13 @@ def main():
     print(f"  Lambda (Behavior): {training_config['loss']['condition_loss_coef']}")
     print(f"  Use Dummy Data: {args.dummy}")
     print(f"  Wandb: {args.wandb}")
+    # ADDED: Print anti-collapse settings
+    print(f"\n🛡️ ANTI-COLLAPSE SETTINGS:")
+    print(f"  Learning Rate: {training_config['optimizer']['params']['lr']}")
+    print(f"  Beta (KL weight): {training_config['loss']['latent_loss_coef']}")
+    print(f"  Batch Size: {training_config['train']['batch_size']}")
+    print(f"  Max Epochs: {training_config['train']['max_epoch']}")
+    print(f"  🎯 Target: Keep KL loss > 0.1")
     print()
     
     # Create trainer

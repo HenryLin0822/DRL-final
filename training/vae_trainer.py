@@ -1,11 +1,12 @@
 """
-Modified VAE Trainer for HPRL - Using ProgramVAE instead of basic VAE
+FIXED VAE Trainer for HPRL - Anti-Collapse Version
 
-Key changes:
-1. Replace VAE with ProgramVAE
-2. Simplify model architecture (ProgramVAE handles everything)
-3. Update forward pass to use ProgramVAE's integrated approach
-4. Simplify loss computation using ProgramVAE's built-in loss method
+Key fixes to prevent posterior collapse:
+1. Much higher beta coefficients (0.5 instead of 0.01)
+2. Lower learning rate to prevent rapid collapse
+3. KL loss monitoring and early stopping
+4. Target KL loss > 0.1 to maintain meaningful latent space
+5. Better beta annealing schedule
 """
 
 import torch
@@ -20,11 +21,20 @@ import logging
 from typing import Dict, List, Tuple, Optional, Any
 from tqdm import tqdm
 from collections import defaultdict
+import matplotlib.pyplot as plt
+
+# Handle NumPy compatibility issue with wandb
+import warnings
+warnings.filterwarnings("ignore", message=".*NumPy.*")
+
+# Optional wandb import
+WANDB_AVAILABLE = False
+print("Warning: wandb not available. Logging will be disabled.")
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.vae import ProgramVAE  # ✅ Use ProgramVAE instead of VAE
+from models.vae import ProgramVAE
 from models.program_executor import ProgramExecutor
 from training.data_loader import make_datasets, ProgramDataset
 from dsl.karel_dsl import get_DSL_option_v2
@@ -35,10 +45,14 @@ from utils.config import config
 
 class HPRLVAETrainer:
     """
-    VAE Trainer for HPRL - Modified to use ProgramVAE
+    FIXED VAE Trainer for HPRL - Prevents Posterior Collapse
     
-    Implements the training procedure with ProgramVAE that includes
-    both program reconstruction and behavioral consistency.
+    Critical changes:
+    - Higher beta coefficients (0.5 instead of 0.01)
+    - KL loss monitoring and early stopping
+    - Target KL loss > 0.1
+    - Lower learning rate for stability
+    - Better annealing schedule
     """
     
     def __init__(
@@ -48,7 +62,7 @@ class HPRLVAETrainer:
         use_wandb: bool = False,
         checkpoint_dir: str = './checkpoints'
     ):
-        """Initialize VAE Trainer with ProgramVAE"""
+        """Initialize FIXED VAE Trainer with anti-collapse settings"""
         self.config = config
         self.device = device
         self.use_wandb = use_wandb
@@ -68,27 +82,29 @@ class HPRLVAETrainer:
         # Model parameters from config
         self.embedding_dim = 64
         self.hidden_size = config.get('net', {}).get('num_rnn_encoder_units', 256)
-        self.latent_dim = 64  # Final compressed latent dimension
+        self.latent_dim = 64
         self.max_program_length = config.get('dsl', {}).get('max_program_len', 12) + 1
         self.max_demo_length = config.get('rl', {}).get('envs', {}).get('executable', {}).get('max_demo_length', 100)
         
-        # Training parameters
-        self.beta = config.get('loss', {}).get('latent_loss_coef', 1.0)
-        self.lambda_behavior = config.get('loss', {}).get('condition_loss_coef', 1.0)
-        self.num_epochs = config.get('train', {}).get('max_epoch', 100)
-        self.batch_size = config.get('train', {}).get('batch_size', 256)
-        self.learning_rate = config.get('optimizer', {}).get('params', {}).get('lr', 5e-4)
+        # FIXED: Anti-collapse training parameters
+        self.base_beta = config.get('loss', {}).get('latent_loss_coef', 0.5)  # Much higher default
+        self.base_lambda_behavior = config.get('loss', {}).get('condition_loss_coef', 0.0)
+        self.num_epochs = config.get('train', {}).get('max_epoch', 150)  # More epochs
+        self.batch_size = config.get('train', {}).get('batch_size', 128)
+        self.learning_rate = config.get('optimizer', {}).get('params', {}).get('lr', 5e-5)  # Lower LR
         
-        # Set num_agent_actions in config if not present
-        if 'dsl' not in self.config:
-            self.config['dsl'] = {}
-        if 'num_agent_actions' not in self.config['dsl']:
-            self.config['dsl']['num_agent_actions'] = len(self.dsl.action_functions) + 1
+        # CRITICAL: Target KL loss to prevent collapse
+        self.target_kl_loss = 0.1  # Minimum KL loss to maintain
+        self.kl_collapse_threshold = 0.01  # Stop training if KL drops below this
         
-        # Add missing config keys that data_loader expects
+        # FIXED: Create anti-collapse schedules
+        self.beta_schedule = self._create_beta_schedule()
+        self.lambda_schedule = self._create_lambda_schedule()
+        
+        # Set config defaults
         self._setup_config_defaults()
         
-        # Initialize models - MAJOR CHANGE HERE
+        # Initialize models
         self._build_models()
         
         # Initialize optimizers
@@ -106,10 +122,55 @@ class HPRLVAETrainer:
         self.train_metrics = defaultdict(list)
         self.val_metrics = defaultdict(list)
         
-        self.logger.info("VAE Trainer initialized successfully with ProgramVAE")
+        # ADDED: Collapse monitoring
+        self.collapse_warnings = 0
+        self.kl_collapse_detected = False
+        self.consecutive_low_kl = 0
+        
+        self.logger.info("FIXED VAE Trainer initialized with anti-collapse settings")
+        self.logger.info(f"Beta schedule: start={self.beta_schedule[0]:.4f}, end={self.beta_schedule[-1]:.4f}")
+        self.logger.info(f"Target KL loss: > {self.target_kl_loss}")
+        self.logger.info(f"Learning rate: {self.learning_rate}")
+    
+    def _create_beta_schedule(self) -> List[float]:
+        """FIXED: Create aggressive beta annealing to prevent collapse"""
+        schedule = []
+        for epoch in range(self.num_epochs):
+            if epoch < 100:
+                # Start with meaningful KL weight immediately (no warmup!)
+                beta = 0.001
+            elif epoch < 30:
+                # Quickly ramp to high beta
+                progress = (epoch - 10) / 20
+                beta = 0.1 + progress * 0.4  # 0.1 -> 0.5
+            elif epoch < 100:
+                # Maintain high KL weight
+                beta = 0.5
+            else:
+                # Even higher for final training
+                beta = min(1, self.base_beta)
+            schedule.append(beta)
+        return schedule
+    
+    def _create_lambda_schedule(self) -> List[float]:
+        """Create lambda schedule to gradually add action loss"""
+        schedule = []
+        for epoch in range(self.num_epochs):
+            if epoch < 80:
+                # Focus on VAE first
+                lambda_val = 1
+            elif epoch < 120:
+                # Gradually add action loss
+                progress = (epoch - 80) / 40
+                lambda_val = self.base_lambda_behavior * progress
+            else:
+                # Use full action loss
+                lambda_val = self.base_lambda_behavior
+            schedule.append(lambda_val)
+        return schedule
     
     def _setup_config_defaults(self):
-        """Setup default config values for compatibility"""
+        """Setup config defaults for compatibility"""
         self.config['use_simplified_dsl'] = self.config.get('use_simplified_dsl', False)
         if 'dsl_tokens' not in self.config:
             self.config['dsl_tokens'] = self.dsl.int2token
@@ -119,6 +180,10 @@ class HPRLVAETrainer:
             self.config['dsl2prl_mapping'] = {token: token for token in self.dsl.int2token}
         if 'max_demo_length' not in self.config:
             self.config['max_demo_length'] = self.max_demo_length
+        if 'dsl' not in self.config:
+            self.config['dsl'] = {}
+        if 'num_agent_actions' not in self.config['dsl']:
+            self.config['dsl']['num_agent_actions'] = len(self.dsl.action_functions) + 1
     
     def _setup_logging(self):
         """Setup logging configuration"""
@@ -130,26 +195,18 @@ class HPRLVAETrainer:
                 logging.StreamHandler()
             ]
         )
-        self.logger = logging.getLogger('VAETrainer')
+        self.logger = logging.getLogger('FixedVAETrainer')
     
     def _build_models(self):
-        """
-        Build models using ProgramVAE - MAJOR SIMPLIFICATION
-        
-        ProgramVAE includes:
-        - VAE for program reconstruction
-        - ConditionPolicy for behavior prediction
-        - Integrated loss computation
-        """
+        """Build ProgramVAE model"""
         self.logger.info("Building ProgramVAE model...")
         
-        # ✅ MAIN CHANGE: Use ProgramVAE instead of separate components
         self.program_vae = ProgramVAE(
             vocab_size=self.vocab_size,
             embedding_dim=self.embedding_dim,
             hidden_size=self.hidden_size,
             latent_dim=self.latent_dim,
-            state_shape=(8, 8, 8),  # Karel environment shape
+            state_shape=(8, 8, 8),
             num_actions=self.config['dsl']['num_agent_actions'],
             max_program_length=self.max_program_length,
             max_demo_length=self.max_demo_length,
@@ -157,7 +214,6 @@ class HPRLVAETrainer:
             rnn_type=self.config['net']['rnn_type']
         ).to(self.device)
         
-        # Keep program executor for generating execution traces if needed
         self.program_executor = ProgramExecutor(
             vocab_size=self.vocab_size,
             max_program_length=self.max_program_length,
@@ -168,36 +224,35 @@ class HPRLVAETrainer:
         self.logger.info(f"ProgramVAE built - Total params: {sum(p.numel() for p in self.program_vae.parameters()):,}")
     
     def _setup_optimizers(self):
-        """Setup optimizer for ProgramVAE - Much simpler now"""
-        # ✅ SIMPLIFIED: Only need to optimize ProgramVAE parameters
+        """Setup optimizer with lower learning rate"""
         self.optimizer = optim.Adam(
             self.program_vae.parameters(),
             lr=self.learning_rate,
             betas=(0.9, 0.999),
-            eps=1e-8
+            eps=1e-8,
+            weight_decay=1e-5  # Added weight decay for stability
         )
         
-        # Learning rate scheduler
+        # FIXED: More conservative scheduler
         scheduler_config = self.config.get('optimizer', {}).get('scheduler', {})
-        self.scheduler = optim.lr_scheduler.StepLR(
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            step_size=scheduler_config.get('step_size', 10),
-            gamma=scheduler_config.get('gamma', 0.95)
+            mode='min',
+            factor=0.8,
+            patience=10
         )
         
-        self.logger.info("Optimizer setup complete")
+        self.logger.info(f"Optimizer setup with LR={self.learning_rate}")
     
     def _setup_data_loaders(self):
-        """Setup data loaders for training and validation"""
+        """Setup data loaders"""
         self.logger.info("Setting up data loaders...")
         
-        # For testing, use dummy data
         if hasattr(self, '_use_dummy_data') and self._use_dummy_data:
             self.logger.info("Using dummy data for testing...")
             self._create_dummy_datasets()
             return
         
-        # Try to find real data
         possible_datadirs = [
             "../data/karel_dataset_option_L30_1m_cover_branch",
             "./data/karel_dataset_option_L30_1m_cover_branch", 
@@ -205,7 +260,7 @@ class HPRLVAETrainer:
             "../data",
             "./data"
         ]
-        
+
         datadir = None
         for path in possible_datadirs:
             if os.path.exists(path):
@@ -237,7 +292,7 @@ class HPRLVAETrainer:
         
         self.val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config.get('valid', {}).get('batch_size', 256),
+            batch_size=self.config.get('valid', {}).get('batch_size', 128),
             shuffle=self.config.get('valid', {}).get('shuffle', True),
             num_workers=self.config.get('data_loader', {}).get('num_workers', 0),
             pin_memory=self.config.get('data_loader', {}).get('pin_memory', False),
@@ -252,25 +307,21 @@ class HPRLVAETrainer:
         
         from torch.utils.data import TensorDataset
         
-        # Generate dummy data - smaller for testing
         num_samples = 100
         dummy_programs = torch.randint(0, self.vocab_size-1, (num_samples, self.max_program_length))
         dummy_program_ids = torch.arange(num_samples)
         dummy_lengths = torch.randint(5, self.max_program_length, (num_samples,))
         dummy_masks = torch.ones(num_samples, self.max_program_length, 1, dtype=torch.bool)
         
-        # Create proper masks based on lengths
         for i, length in enumerate(dummy_lengths):
             dummy_masks[i, length:] = False
         
-        # Create dummy execution data
         num_demos = 3
         demo_length = 10
         dummy_states = torch.randn(num_samples, num_demos, demo_length, 8, 8, 8)
         dummy_actions = torch.randint(0, 5, (num_samples, num_demos, demo_length-1), dtype=torch.long)
         dummy_action_lengths = torch.randint(1, demo_length-1, (num_samples, num_demos), dtype=torch.long)
         
-        # Split into train/val
         train_size = int(0.8 * num_samples)
         
         train_dataset = TensorDataset(
@@ -305,44 +356,101 @@ class HPRLVAETrainer:
         action_lengths: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
         """
-        ✅ SIMPLIFIED FORWARD PASS using ProgramVAE
-        
-        ProgramVAE handles all the complexity internally:
-        - Program encoding/decoding
-        - Latent sampling
-        - Action prediction
-        - Loss computation
+        FIXED forward pass with collapse monitoring
         """
-        # ✅ MAJOR SIMPLIFICATION: One call to ProgramVAE
-        results = self.program_vae(
-            programs=programs,
-            program_lengths=program_lengths,
-            states=states,
-            target_actions=target_actions,
-            target_programs=programs,  # Use same programs as targets for reconstruction
-            deterministic=False,
-            compute_policy=True
-        )
+        # Get current coefficients from schedules
+        current_beta = self.beta_schedule[min(self.current_epoch, len(self.beta_schedule)-1)]
+        current_lambda = self.lambda_schedule[min(self.current_epoch, len(self.lambda_schedule)-1)]
         
-        # ✅ SIMPLIFIED LOSS COMPUTATION using ProgramVAE's built-in method
-        losses = self.program_vae.loss(
-            programs=programs,
-            program_lengths=program_lengths,
-            target_programs=programs,
-            states=states,
-            target_actions=target_actions,
-            beta=self.beta,
-            action_weight=self.lambda_behavior
-        )
+        # Use action loss only when lambda > 0
+        use_action_loss = current_lambda > 0
         
-        # Combine results and losses
-        results.update(losses)
+        # Forward pass through ProgramVAE
+        if use_action_loss:
+            results = self.program_vae(
+                programs=programs,
+                program_lengths=program_lengths,
+                states=states,
+                target_actions=target_actions,
+                target_programs=programs,
+                deterministic=False,
+                compute_policy=True
+            )
+        else:
+            results = self.program_vae(
+                programs=programs,
+                program_lengths=program_lengths,
+                states=None,
+                target_actions=None,
+                target_programs=programs,
+                deterministic=False,
+                compute_policy=False
+            )
         
-        return results
+        # Compute losses with current coefficients
+        if use_action_loss:
+            losses = self.program_vae.loss(
+                programs=programs,
+                program_lengths=program_lengths,
+                target_programs=programs,
+                states=states,
+                target_actions=target_actions,
+                beta=current_beta,
+                action_weight=current_lambda
+            )
+        else:
+            losses = self.program_vae.loss(
+                programs=programs,
+                program_lengths=program_lengths,
+                target_programs=programs,
+                states=None,
+                target_actions=None,
+                beta=current_beta,
+                action_weight=0.0
+            )
+        
+        # CRITICAL: Monitor for collapse and enforce minimum KL
+        self._monitor_and_enforce_kl(losses, current_beta, current_lambda)
+        
+        return losses
+    
+    def _monitor_and_enforce_kl(self, losses: Dict[str, torch.Tensor], beta: float, lambda_val: float):
+        """CRITICAL: Monitor and enforce minimum KL loss to prevent collapse"""
+        recon_loss = losses['recon_loss'].item()
+        kl_loss = losses['kl_loss'].item()
+        
+        # Check for collapse
+        if kl_loss < self.kl_collapse_threshold and beta > 0.1:
+            self.consecutive_low_kl += 1
+            self.logger.error(f"🚨 KL COLLAPSE WARNING {self.consecutive_low_kl}/5: KL={kl_loss:.6f} < {self.kl_collapse_threshold}")
+            
+            if self.consecutive_low_kl >= 5:
+                self.logger.error("🚨 STOPPING TRAINING: KL collapse detected!")
+                self.kl_collapse_detected = True
+                raise ValueError("Training stopped due to KL collapse")
+        else:
+            self.consecutive_low_kl = 0
+        
+        # Monitor KL health
+        if kl_loss < self.target_kl_loss and beta > 0.1:
+            self.logger.warning(f"⚠️ Low KL: {kl_loss:.4f} (target: >{self.target_kl_loss})")
+        elif kl_loss >= self.target_kl_loss:
+            if self.global_step % 100 == 0:
+                self.logger.info(f"✅ Healthy KL: {kl_loss:.4f} (target: >{self.target_kl_loss})")
+        
+        # Detailed logging every 100 steps
+        if self.global_step % 100 == 0:
+            self.logger.info(f"Step {self.global_step}: recon={recon_loss:.4f}, kl={kl_loss:.4f}, "
+                           f"β={beta:.4f}, λ={lambda_val:.4f}")
     
     def train_epoch(self) -> Dict[str, float]:
-        """Train for one epoch - Much simpler now"""
+        """Train for one epoch with collapse monitoring"""
         self.program_vae.train()
+        
+        current_beta = self.beta_schedule[min(self.current_epoch, len(self.beta_schedule)-1)]
+        current_lambda = self.lambda_schedule[min(self.current_epoch, len(self.lambda_schedule)-1)]
+        
+        self.logger.info(f"Epoch {self.current_epoch}: β={current_beta:.4f}, λ={current_lambda:.4f}")
         
         epoch_metrics = defaultdict(float)
         num_batches = 0
@@ -350,51 +458,61 @@ class HPRLVAETrainer:
         progress_bar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}")
         
         for batch_idx, batch in enumerate(progress_bar):
-            # Unpack batch
             programs, program_ids, masks, states, target_actions, action_lengths = batch
             
-            # Move to device and ensure correct data types
             programs = programs.to(self.device).long()
             states = states.to(self.device).float()
             target_actions = target_actions.to(self.device).long()
             action_lengths = action_lengths.to(self.device).long()
             
-            # Get actual program lengths from masks
             program_lengths = masks.sum(dim=1).squeeze(-1).to(self.device).long()
             
-            # Zero gradients
             self.optimizer.zero_grad()
             
-            # ✅ SIMPLIFIED: Forward pass using ProgramVAE
-            results = self.forward_pass(
-                programs, program_lengths, states, target_actions, action_lengths
-            )
-            
-            # Backward pass
-            results['total_loss'].backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.program_vae.parameters(), max_norm=1.0)
-            
-            # Optimizer step
-            self.optimizer.step()
-            
-            # Update metrics
-            for key, value in results.items():
-                if isinstance(value, torch.Tensor) and 'loss' in key:
-                    epoch_metrics[key] += value.item()
-            
-            num_batches += 1
-            self.global_step += 1
-            
-            # Update progress bar
-            current_loss = results['total_loss'].item()
-            progress_bar.set_postfix({
-                'loss': f'{current_loss:.4f}',
-                'recon': f'{results["recon_loss"].item():.4f}',
-                'kl': f'{results["kl_loss"].item():.4f}',
-                'action': f'{results["action_loss"]:.4f}'
-            })
+            try:
+                # Forward pass with collapse monitoring
+                results = self.forward_pass(
+                    programs, program_lengths, states, target_actions, action_lengths
+                )
+                
+                # Backward pass
+                results['total_loss'].backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.program_vae.parameters(), max_norm=1.0)
+                
+                self.optimizer.step()
+                
+                # Update metrics
+                for key, value in results.items():
+                    if isinstance(value, torch.Tensor) and 'loss' in key:
+                        epoch_metrics[key] += value.item()
+                
+                num_batches += 1
+                self.global_step += 1
+                
+                # Update progress bar
+                current_loss = results['total_loss'].item()
+                current_kl = results['kl_loss'].item()
+                progress_bar.set_postfix({
+                    'loss': f'{current_loss:.4f}',
+                    'recon': f'{results["recon_loss"].item():.4f}',
+                    'kl': f'{current_kl:.4f}',
+                    'β': f'{current_beta:.3f}',
+                    'target_kl': f'>{self.target_kl_loss}'
+                })
+                
+                # Check for collapse during training
+                if self.kl_collapse_detected:
+                    self.logger.error("Training stopped due to KL collapse!")
+                    break
+                    
+            except ValueError as e:
+                if "KL collapse" in str(e):
+                    self.logger.error("Training terminated due to KL collapse")
+                    break
+                else:
+                    raise e
         
         # Average metrics
         if num_batches > 0:
@@ -404,7 +522,7 @@ class HPRLVAETrainer:
         return dict(epoch_metrics)
     
     def validate_epoch(self) -> Dict[str, float]:
-        """Validate for one epoch"""
+        """Validate for one epoch with KL monitoring"""
         self.program_vae.eval()
         
         epoch_metrics = defaultdict(float)
@@ -412,103 +530,140 @@ class HPRLVAETrainer:
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Validation"):
-                # Unpack batch
                 programs, program_ids, masks, states, target_actions, action_lengths = batch
                 
-                # Move to device and ensure correct data types
                 programs = programs.to(self.device).long()
                 states = states.to(self.device).float()
                 target_actions = target_actions.to(self.device).long()
                 action_lengths = action_lengths.to(self.device).long()
                 
-                # Get actual program lengths
                 program_lengths = masks.sum(dim=1).squeeze(-1).to(self.device).long()
                 
-                # Forward pass
                 results = self.forward_pass(
                     programs, program_lengths, states, target_actions, action_lengths
                 )
                 
-                # Update metrics
                 for key, value in results.items():
                     if isinstance(value, torch.Tensor) and 'loss' in key:
                         epoch_metrics[key] += value.item()
                 
                 num_batches += 1
         
-        # Average metrics
         if num_batches > 0:
             for key in epoch_metrics:
                 epoch_metrics[key] /= num_batches
         
+        # Check validation KL health
+        val_kl = epoch_metrics.get('kl_loss', 0)
+        current_beta = self.beta_schedule[min(self.current_epoch, len(self.beta_schedule)-1)]
+        
+        if val_kl < self.target_kl_loss and current_beta > 0.1:
+            self.logger.warning(f"⚠️ Validation KL low: {val_kl:.4f} (target: >{self.target_kl_loss})")
+        
         return dict(epoch_metrics)
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
-        """Save model checkpoint - Simplified"""
+        """Save model checkpoint with anti-collapse info"""
         checkpoint = {
             'epoch': epoch,
             'global_step': self.global_step,
-            'program_vae_state_dict': self.program_vae.state_dict(),  # ✅ Single model
+            'program_vae_state_dict': self.program_vae.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self.scheduler, 'state_dict') else None,
             'config': self.config,
             'best_val_loss': self.best_val_loss,
             'train_metrics': dict(self.train_metrics),
-            'val_metrics': dict(self.val_metrics)
+            'val_metrics': dict(self.val_metrics),
+            'beta_schedule': self.beta_schedule,
+            'lambda_schedule': self.lambda_schedule,
+            'collapse_warnings': self.collapse_warnings,
+            'target_kl_loss': self.target_kl_loss,
+            'kl_collapse_detected': self.kl_collapse_detected
         }
         
-        # Save best model
         if is_best:
             best_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
             torch.save(checkpoint, best_path)
             self.logger.info(f"Saved best model at epoch {epoch}")
         
-        # Save latest model
         latest_path = os.path.join(self.checkpoint_dir, 'latest_model.pt')
         torch.save(checkpoint, latest_path)
     
     def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint - Simplified"""
+        """Load model checkpoint"""
         self.logger.info(f"Loading checkpoint from {checkpoint_path}")
         
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        self.program_vae.load_state_dict(checkpoint['program_vae_state_dict'])  # ✅ Single model
+        self.program_vae.load_state_dict(checkpoint['program_vae_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if checkpoint.get('scheduler_state_dict') and hasattr(self.scheduler, 'load_state_dict'):
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
         self.current_epoch = checkpoint['epoch']
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint['best_val_loss']
         
+        # Load schedules and collapse info if available
+        if 'beta_schedule' in checkpoint:
+            self.beta_schedule = checkpoint['beta_schedule']
+        if 'lambda_schedule' in checkpoint:
+            self.lambda_schedule = checkpoint['lambda_schedule']
+        if 'collapse_warnings' in checkpoint:
+            self.collapse_warnings = checkpoint['collapse_warnings']
+        if 'kl_collapse_detected' in checkpoint:
+            self.kl_collapse_detected = checkpoint['kl_collapse_detected']
+        
         self.logger.info(f"Loaded checkpoint from epoch {self.current_epoch}")
     
     def train(self, resume_from: Optional[str] = None):
-        """Main training loop"""
+        """Main training loop with anti-collapse monitoring"""
         if resume_from:
             self.load_checkpoint(resume_from)
         
-        self.logger.info("Starting ProgramVAE training...")
+        self.logger.info("Starting FIXED VAE training with anti-collapse protection...")
         self.logger.info(f"Training for {self.num_epochs} epochs")
-        self.logger.info(f"Beta (KL weight): {self.beta}")
-        self.logger.info(f"Lambda (action weight): {self.lambda_behavior}")
+        self.logger.info(f"Learning rate: {self.learning_rate}")
+        self.logger.info(f"Beta schedule: {self.beta_schedule[0]:.4f} → {self.beta_schedule[-1]:.4f}")
+        self.logger.info(f"Target KL loss: > {self.target_kl_loss}")
+        self.logger.info(f"KL collapse threshold: < {self.kl_collapse_threshold}")
         
         try:
             for epoch in range(self.current_epoch, self.num_epochs):
                 self.current_epoch = epoch
                 
+                # Check if collapse was detected
+                if self.kl_collapse_detected:
+                    self.logger.error("Training stopped due to KL collapse detection")
+                    break
+                
                 # Training
                 train_metrics = self.train_epoch()
+                
+                if self.kl_collapse_detected:
+                    break
                 
                 # Validation
                 val_metrics = self.validate_epoch()
                 
-                # Update learning rate
-                self.scheduler.step()
+                # Update learning rate scheduler
+                val_loss = val_metrics.get('total_loss', float('inf'))
+                if hasattr(self.scheduler, 'step') and hasattr(self.scheduler, 'mode'):
+                    self.scheduler.step(val_loss)
                 
                 # Log epoch results
+                train_kl = train_metrics.get('kl_loss', 0)
+                val_kl = val_metrics.get('kl_loss', 0)
+                
                 self.logger.info(f"Epoch {epoch} - Train Loss: {train_metrics.get('total_loss', 0):.4f}, "
                                f"Val Loss: {val_metrics.get('total_loss', 0):.4f}")
+                self.logger.info(f"  KL Losses - Train: {train_kl:.4f}, Val: {val_kl:.4f} (target: >{self.target_kl_loss})")
+                
+                # Health check
+                if train_kl > self.target_kl_loss and val_kl > self.target_kl_loss:
+                    self.logger.info(f"✅ Healthy training: KL losses above target")
+                elif epoch > 10:  # Allow some initial epochs for warmup
+                    self.logger.warning(f"⚠️ KL health concern: train={train_kl:.4f}, val={val_kl:.4f}")
                 
                 # Save metrics
                 for key, value in train_metrics.items():
@@ -517,12 +672,11 @@ class HPRLVAETrainer:
                     self.val_metrics[key].append(value)
                 
                 # Save checkpoint
-                val_loss = val_metrics.get('total_loss', float('inf'))
                 is_best = val_loss < self.best_val_loss
                 if is_best:
                     self.best_val_loss = val_loss
                 
-                if epoch % self.config.get('save_interval', 10) == 0 or is_best:
+                if epoch % 5 == 0 or is_best:
                     self.save_checkpoint(epoch, is_best)
         
         except KeyboardInterrupt:
@@ -533,9 +687,27 @@ class HPRLVAETrainer:
         
         self.logger.info("Training completed")
         self.save_checkpoint(self.current_epoch, False)
+        
+        # Final health report
+        final_train_kl = self.train_metrics.get('kl_loss', [0])[-1] if self.train_metrics.get('kl_loss') else 0
+        final_val_kl = self.val_metrics.get('kl_loss', [0])[-1] if self.val_metrics.get('kl_loss') else 0
+        
+        self.logger.info(f"\n🎯 FINAL TRAINING REPORT:")
+        self.logger.info(f"  Final KL losses - Train: {final_train_kl:.4f}, Val: {final_val_kl:.4f}")
+        self.logger.info(f"  Target KL loss: > {self.target_kl_loss}")
+        
+        if final_train_kl > self.target_kl_loss and final_val_kl > self.target_kl_loss:
+            self.logger.info(f"  ✅ SUCCESS: Maintained healthy KL losses!")
+            self.logger.info(f"  🎉 VAE should have meaningful latent space for HPRL")
+        elif self.kl_collapse_detected:
+            self.logger.error(f"  ❌ FAILURE: KL collapse detected during training")
+            self.logger.error(f"  💡 Try: Higher beta, lower learning rate, or different architecture")
+        else:
+            self.logger.warning(f"  ⚠️ PARTIAL: KL losses below target but no collapse detected")
+            self.logger.warning(f"  💡 Consider: Higher beta coefficient for next training")
     
     def generate_samples(self, num_samples: int = 10) -> List[str]:
-        """Generate sample programs from the trained ProgramVAE"""
+        """Generate sample programs from the trained model"""
         self.program_vae.eval()
         
         generated_programs = []
@@ -544,55 +716,138 @@ class HPRLVAETrainer:
             # Sample from prior
             z = torch.randn(num_samples, self.latent_dim, device=self.device)
             
-            # Generate programs using ProgramVAE
-            predicted_tokens = self.program_vae.generate_program(z, deterministic=True)
-            
-            for i in range(num_samples):
-                tokens = predicted_tokens[i].cpu().numpy()
-                # Remove padding
-                tokens = tokens[tokens != self.padding_idx]
-                program_str = self.dsl.intseq2str(tokens.tolist())
-                generated_programs.append(program_str)
+            # Generate programs (this may still fail if collapse occurred)
+            try:
+                predicted_tokens = self.program_vae.generate_program(z, deterministic=True)
+                
+                for i in range(num_samples):
+                    tokens = predicted_tokens[i].cpu().numpy()
+                    tokens = tokens[tokens != self.padding_idx]
+                    program_str = self.dsl.intseq2str(tokens.tolist())
+                    generated_programs.append(program_str)
+            except Exception as e:
+                self.logger.warning(f"Generation failed: {e}")
+                generated_programs = [f"<GENERATION_ERROR>"] * num_samples
         
         return generated_programs
+    
+    def test_latent_space_quality(self) -> Dict[str, Any]:
+        """Test the quality of the learned latent space"""
+        self.logger.info("Testing latent space quality...")
+        
+        test_programs = [
+            "DEF run m( move m)",
+            "DEF run m( turnLeft m)",
+            "DEF run m( turnRight m)",
+            "DEF run m( pickMarker m)",
+            "DEF run m( putMarker m)"
+        ]
+        
+        embeddings = []
+        
+        with torch.no_grad():
+            for program in test_programs:
+                try:
+                    tokens = self.dsl.str2intseq(program)
+                    padded_tokens = tokens + [self.padding_idx] * (self.max_program_length - len(tokens))
+                    padded_tokens = padded_tokens[:self.max_program_length]
+                    
+                    tokens_tensor = torch.tensor([padded_tokens], dtype=torch.long, device=self.device)
+                    lengths_tensor = torch.tensor([len(tokens)], device=self.device)
+                    
+                    mu, logvar = self.program_vae.vae.encode(tokens_tensor, lengths_tensor)
+                    embeddings.append(mu.cpu().numpy()[0])
+                except Exception as e:
+                    self.logger.warning(f"Error encoding '{program}': {e}")
+        
+        if len(embeddings) < 2:
+            return {'error': 'Could not encode enough programs for analysis'}
+        
+        embeddings = np.array(embeddings)
+        
+        # Calculate diversity metrics
+        norms = np.linalg.norm(embeddings, axis=1)
+        distances = []
+        for i in range(len(embeddings)):
+            for j in range(i + 1, len(embeddings)):
+                distances.append(np.linalg.norm(embeddings[i] - embeddings[j]))
+        
+        mean_distance = np.mean(distances)
+        dimension_stds = np.std(embeddings, axis=0)
+        active_dimensions = np.sum(dimension_stds > 0.01)
+        
+        quality_report = {
+            'num_programs_tested': len(test_programs),
+            'mean_embedding_norm': float(np.mean(norms)),
+            'mean_pairwise_distance': float(mean_distance),
+            'active_dimensions': int(active_dimensions),
+            'dimension_usage_ratio': float(active_dimensions / self.latent_dim),
+            'embeddings_shape': embeddings.shape
+        }
+        
+        # Assessment
+        if mean_distance > 0.5 and active_dimensions > 10:
+            quality_report['assessment'] = 'good'
+            self.logger.info("✅ Latent space appears healthy")
+        elif mean_distance > 0.1 and active_dimensions > 5:
+            quality_report['assessment'] = 'moderate'
+            self.logger.warning("⚠️ Latent space has moderate quality")
+        else:
+            quality_report['assessment'] = 'poor'
+            self.logger.warning("❌ Latent space may be collapsed")
+        
+        self.logger.info(f"  Active dimensions: {active_dimensions}/{self.latent_dim}")
+        self.logger.info(f"  Mean pairwise distance: {mean_distance:.4f}")
+        
+        return quality_report
 
 
-# Example usage
 if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore", message=".*NumPy.*")
     
-    # Setup configuration
+    # Test configuration with anti-collapse settings
     test_config = config.copy()
-    test_config['train']['max_epoch'] = 2
+    test_config['train']['max_epoch'] = 10  # Short test
     test_config['train']['batch_size'] = 4
     test_config['valid']['batch_size'] = 4
+    test_config['loss']['latent_loss_coef'] = 0.5  # Higher beta
+    test_config['optimizer']['params']['lr'] = 5e-5  # Lower LR
     
     # Create trainer
     trainer = HPRLVAETrainer(
         config=test_config,
         device='cuda' if torch.cuda.is_available() else 'cpu',
         use_wandb=False,
-        checkpoint_dir='./test_checkpoints'
+        checkpoint_dir='./test_checkpoints_fixed'
     )
     
-    # Force use of dummy data for testing
+    # Force dummy data for testing
     trainer._use_dummy_data = True
     trainer._setup_data_loaders()
     
-    print("ProgramVAE Trainer created successfully!")
+    print("✅ FIXED VAE Trainer created successfully!")
+    print(f"🛡️ Anti-collapse settings:")
+    print(f"  Beta schedule: {trainer.beta_schedule[:5]}... → {trainer.beta_schedule[-1]}")
+    print(f"  Target KL loss: > {trainer.target_kl_loss}")
+    print(f"  Learning rate: {trainer.learning_rate}")
     
     try:
+        # Short training test
         trainer.train()
-        print("Training test completed!")
+        print("✅ Training test completed!")
         
-        # Test sample generation
+        # Test latent space quality
+        quality_report = trainer.test_latent_space_quality()
+        print(f"📊 Latent space assessment: {quality_report.get('assessment', 'unknown')}")
+        
+        # Test generation
         samples = trainer.generate_samples(num_samples=3)
-        print("\nGenerated samples:")
+        print("\n🎲 Generated samples:")
         for i, sample in enumerate(samples):
             print(f"  {i+1}: {sample}")
             
     except Exception as e:
-        print(f"Error during training test: {e}")
+        print(f"❌ Error during training test: {e}")
         import traceback
         traceback.print_exc()

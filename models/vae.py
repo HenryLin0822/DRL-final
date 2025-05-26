@@ -1,3 +1,14 @@
+"""
+FIXED VAE Model for HPRL - Anti-Collapse Version
+
+Key fixes:
+1. KL loss monitoring and enforcement
+2. Improved reparameterization with clamping
+3. Better loss computation with minimum KL enforcement
+4. Active dimension tracking
+5. Collapse prevention mechanisms
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -282,7 +293,7 @@ class ConditionPolicy(NNBase):
 
 
 class VAE(nn.Module):
-    """Variational Autoencoder for programs."""
+    """FIXED Variational Autoencoder for programs with collapse prevention."""
     
     def __init__(self, vocab_size, embedding_dim, hidden_size, latent_dim, 
                  max_program_length=50, dropout=0.0, rnn_type='GRU'):
@@ -298,18 +309,49 @@ class VAE(nn.Module):
         self.mu_projection = nn.Linear(hidden_size, latent_dim)
         self.logvar_projection = nn.Linear(hidden_size, latent_dim)
         
+        # ADDED: Diagnostics for monitoring
+        self.last_kl_per_dim = None
+        self.last_active_dims = 0
+        self.last_mu_stats = {}
+        self.last_logvar_stats = {}
+        
     def encode(self, programs, program_lengths):
         """Encode programs to latent parameters."""
         encoded = self.encoder(programs, program_lengths)
         mu = self.mu_projection(encoded)
         logvar = self.logvar_projection(encoded)
+        
+        # ADDED: Store statistics for monitoring
+        with torch.no_grad():
+            self.last_mu_stats = {
+                'mean': float(mu.mean().item()),
+                'std': float(mu.std().item()),
+                'norm': float(torch.norm(mu, dim=1).mean().item())
+            }
+            self.last_logvar_stats = {
+                'mean': float(logvar.mean().item()),
+                'std': float(logvar.std().item())
+            }
+        
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
-        """Reparameterization trick for sampling latent variables."""
+        """FIXED: Reparameterization trick with clamping to prevent collapse."""
         std = torch.exp(0.5 * logvar)
+        
+        # CRITICAL: Clamp std to prevent collapse
+        std = torch.clamp(std, min=1e-3, max=10.0)
+        
         eps = torch.randn_like(std)
-        return mu + eps * std
+        z = mu + eps * std
+        
+        # ADDED: Monitor latent statistics
+        with torch.no_grad():
+            z_norm = torch.norm(z, dim=1).mean().item()
+            if hasattr(self, 'last_z_norm'):
+                self.last_z_norm = z_norm
+        
+        return z
     
     def decode(self, latent, target_programs=None, deterministic=True):
         """Decode latent variables to programs."""
@@ -329,16 +371,47 @@ class VAE(nn.Module):
         return output_logits, output_log_probs, latent, mu, logvar
     
     def kl_loss(self, mu, logvar):
-        """KL divergence loss for VAE training."""
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.size(0)
+        """FIXED: KL divergence loss with monitoring and collapse prevention."""
+        # Standard KL loss
+        kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+        kl_loss = kl_per_sample.mean()
+        
+        # ADDED: Monitor individual KL terms for diagnostics
+        with torch.no_grad():
+            kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean(dim=0)
+            active_dims = (kl_per_dim > 0.01).sum().item()
+            
+            # Store diagnostics
+            self.last_kl_per_dim = kl_per_dim
+            self.last_active_dims = active_dims
+            
+            # Monitor mu and logvar variance across dimensions
+            mu_var_across_dims = torch.var(mu, dim=0).mean().item()
+            logvar_var_across_dims = torch.var(logvar, dim=0).mean().item()
+            
+            # Store additional diagnostics
+            if not hasattr(self, 'kl_diagnostics'):
+                self.kl_diagnostics = {}
+            
+            self.kl_diagnostics.update({
+                'kl_per_sample_mean': float(kl_per_sample.mean().item()),
+                'kl_per_sample_std': float(kl_per_sample.std().item()),
+                'active_dimensions': active_dims,
+                'total_dimensions': mu.size(1),
+                'mu_variance_across_dims': mu_var_across_dims,
+                'logvar_variance_across_dims': logvar_var_across_dims,
+                'dimension_usage_ratio': active_dims / mu.size(1)
+            })
+        
+        return kl_loss
 
 
 class ProgramVAE(nn.Module):
     """
-    Clean implementation of ProgramVAE combining program synthesis with execution.
+    FIXED ProgramVAE with collapse prevention and monitoring
     
     This model consists of:
-    1. A VAE that learns to encode/decode programs
+    1. A VAE that learns to encode/decode programs with collapse prevention
     2. A condition policy that generates actions conditioned on program latents and states
     """
     
@@ -352,14 +425,18 @@ class ProgramVAE(nn.Module):
         self.max_program_length = max_program_length
         self.max_demo_length = max_demo_length
         
-        # VAE for program synthesis
+        # VAE for program synthesis with collapse prevention
         self.vae = VAE(vocab_size, embedding_dim, hidden_size, latent_dim, 
                       max_program_length, dropout, rnn_type)
         
         # Condition policy for action generation
         self.condition_policy = ConditionPolicy(state_shape, num_actions, latent_dim, 
                                               hidden_size, max_demo_length, dropout, rnn_type)
-    
+        
+        # ADDED: Minimum KL loss enforcement
+        self.min_kl_loss = 0.01  # Minimum KL to maintain
+        self.kl_regularization_weight = 1.0
+        
     def forward(self, programs, program_lengths, states=None, target_actions=None, 
                 target_programs=None, deterministic=True, compute_policy=True):
         """
@@ -388,7 +465,13 @@ class ProgramVAE(nn.Module):
             'kl_loss': self.vae.kl_loss(mu, logvar)
         }
         
+        # ADDED: Store VAE diagnostics
+        if hasattr(self.vae, 'kl_diagnostics'):
+            results['kl_diagnostics'] = self.vae.kl_diagnostics
+        
         # Condition policy forward pass
+        #print("states:", states)
+        #print("compute_policy:", compute_policy)
         if compute_policy and states is not None:
             action_logits, action_log_probs = self.condition_policy(
                 states, latent, target_actions, deterministic
@@ -417,7 +500,7 @@ class ProgramVAE(nn.Module):
     def loss(self, programs, program_lengths, target_programs, states=None, 
              target_actions=None, beta=1.0, action_weight=1.0):
         """
-        Compute total loss for training.
+        FIXED: Compute total loss with KL collapse prevention
         
         Args:
             beta: weight for KL divergence loss
@@ -449,10 +532,20 @@ class ProgramVAE(nn.Module):
         # KL divergence loss
         kl_loss = results['kl_loss']
         
-        total_loss = recon_loss + beta * kl_loss
+        # CRITICAL: Enforce minimum KL loss to prevent collapse
+        kl_regularization = torch.tensor(0.0, device=programs.device)
+        if kl_loss < self.min_kl_loss and beta > 0.1:
+            kl_regularization = self.kl_regularization_weight * (self.min_kl_loss - kl_loss)
+            # Log this intervention
+            if hasattr(self, '_log_kl_regularization'):
+                self._log_kl_regularization = True
+        
+        total_loss = recon_loss + beta * kl_loss + kl_regularization
         
         # Action prediction loss (if applicable)
-        action_loss = 0.0
+        action_loss = torch.tensor(0.0, device=programs.device)
+        #print(results['action_logits'])
+        #print("target_actions",target_actions)
         if 'action_logits' in results and target_actions is not None:
             # Debug shapes to understand the mismatch
             action_logits = results['action_logits']  # [batch_size, num_demos, num_actions, seq_len-1]
@@ -478,13 +571,48 @@ class ProgramVAE(nn.Module):
                 target_actions_flat,
                 reduction='mean'
             )
+            #print("action weight:", action_weight)
+            #print("action loss:", action_loss)
             total_loss += action_weight * action_loss
         
-        return {
+        loss_dict = {
             'total_loss': total_loss,
             'recon_loss': recon_loss,
             'kl_loss': kl_loss,
-            'action_loss': action_loss
+            'action_loss': action_loss,
+            'kl_regularization': kl_regularization
+        }
+        
+        # ADDED: Include diagnostics in loss output
+        if hasattr(self.vae, 'kl_diagnostics'):
+            loss_dict['diagnostics'] = self.vae.kl_diagnostics.copy()
+        
+        return loss_dict
+    
+    def get_latent_space_health(self):
+        """Get current health metrics of the latent space"""
+        if not hasattr(self.vae, 'kl_diagnostics'):
+            return {'error': 'No diagnostics available'}
+        
+        diagnostics = self.vae.kl_diagnostics
+        
+        health_status = 'unknown'
+        if diagnostics.get('active_dimensions', 0) > self.latent_dim * 0.3:
+            if diagnostics.get('dimension_usage_ratio', 0) > 0.5:
+                health_status = 'healthy'
+            else:
+                health_status = 'moderate'
+        else:
+            health_status = 'poor'
+        
+        return {
+            'health_status': health_status,
+            'active_dimensions': diagnostics.get('active_dimensions', 0),
+            'total_dimensions': self.latent_dim,
+            'dimension_usage_ratio': diagnostics.get('dimension_usage_ratio', 0),
+            'kl_per_sample_mean': diagnostics.get('kl_per_sample_mean', 0),
+            'mu_variance': diagnostics.get('mu_variance_across_dims', 0),
+            'logvar_variance': diagnostics.get('logvar_variance_across_dims', 0)
         }
 
 
@@ -501,7 +629,7 @@ if __name__ == "__main__":
     num_demos = 2
     demo_len = 8
     
-    # Create model
+    # Create model with anti-collapse features
     model = ProgramVAE(
         vocab_size=vocab_size,
         embedding_dim=64,
@@ -533,12 +661,10 @@ if __name__ == "__main__":
     if 'action_logits' in results:
         print(f"Action logits: {results['action_logits'].shape}")
     
-    # Compute loss
-    losses = model.loss(programs, program_lengths, programs, states, target_actions)
+    # Compute loss with high beta to prevent collapse
+    losses = model.loss(programs, program_lengths, programs, states, target_actions, 
+                       beta=0.5, action_weight=1.0)  # High beta!
     
-    print(f"\nModel created successfully!")
+    print(f"\nFixed Model created successfully!")
     print(f"Total loss: {losses['total_loss'].item():.4f}")
-    print(f"Reconstruction loss: {losses['recon_loss'].item():.4f}")
-    print(f"KL loss: {losses['kl_loss'].item():.4f}")
-    print(f"Action loss: {losses['action_loss']:.4f}")
-    print(f"Latent dimension: {model.latent_dim}")
+    print(f"Reconstruction loss: {losses['recon_loss'].item()}")
