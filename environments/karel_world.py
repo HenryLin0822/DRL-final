@@ -143,7 +143,7 @@ class KarelWorld:
         success = self._execute_action(Action(action))
         
         # Calculate reward
-        reward = self._calculate_reward() if success else -0.1
+        reward = self._calculate_reward() if success else 0.0 # from -0.1 to 0
         
         # Check termination conditions
         self.done = self._check_done() or (self.step_count >= self.timeout_steps)
@@ -160,7 +160,8 @@ class KarelWorld:
             'step_count': self.step_count,
             'total_reward': self.total_reward
         }
-        
+        #if(reward<0):
+        #    print("xxx")
         return self.state.copy(), reward, self.done, info
     
     def _execute_action(self, action: Action) -> bool:
@@ -447,45 +448,21 @@ class KarelWorld:
         done = distance_to_goal == 0
         reward = float(done)
         self.done = self.done or done
+        #print(reward)
         return reward
     
     def _stair_climber_reward(self, agent_pos) -> float:
-        """Reward for stairClimber task: reach the marker"""
         if self.done:
-            return 0.0
-            
-        # Find initial marker position
-        x, y = np.where(self.initial_state[:, :, 6] > 0)
-        if len(x) != 1:
-            return 0.0
-            
-        marker_pos = np.array([x[0], y[0]])
-        reward = -1 * (abs(agent_pos[0] - marker_pos[0]) + abs(agent_pos[1] - marker_pos[1]))
-        
-        # Initial agent position for longest distance calculation
-        x_init, y_init, z_init = np.where(self.initial_state[:, :, :4] > 0)
-        init_pos = np.array([x_init[0], y_init[0]])
-        longest_distance = abs(init_pos[0] - marker_pos[0]) + abs(init_pos[1] - marker_pos[1])
-        
-        # Initialize prev_pos_reward on first step
-        if len(self.state_history) == 2:
-            self.prev_pos_reward = -1 * (abs(init_pos[0] - marker_pos[0]) + abs(init_pos[1] - marker_pos[1]))
-            
-        if self.reward_diff:
-            abs_reward = reward
-            if 'agent_valid_positions' in self.metadata:
-                reward = self.prev_pos_reward - 1.0 if tuple(agent_pos[:2]) not in self.metadata['agent_valid_positions'] else reward
-            reward = (reward - self.prev_pos_reward) / longest_distance
-            self.prev_pos_reward = abs_reward
-            done = abs_reward == 0
-        else:
-            done = reward == 0
-            
-        reward = reward if self.task == 'stairClimber' else float(done)
-        if self.task == 'stairClimber_sparse':
-            reward = reward if done and not self.done else 0
-        self.done = self.done or done
-        return reward
+            return 0.0                     # episode already finished
+        #print("agent_pos", agent_pos)
+        # where is the goal?
+        gx, gy = np.where(self.initial_state[:, :, 6]>0)
+        #print("gx, gy", gx, gy)
+        reached = (agent_pos[0] == gx[0]) and (agent_pos[1] == gy[0])
+
+        if reached:
+            self.done = True               # terminate the episode
+        return 1.0 if reached else 0.0
     
     def _top_off_reward(self, agent_pos) -> float:
         """Reward for topOff task: fill bottom row and reach end"""
