@@ -1,7 +1,7 @@
 """
-Token definitions for Karel DSL - FINAL COMPLETE VERSION
+Token definitions for Karel DSL - Updated with specific mapping
 
-This includes ALL possible Karel condition tokens to prevent any missing token issues.
+This uses the exact token ordering as specified in the mapping while maintaining all original functions.
 """
 
 from typing import Dict, List, Tuple
@@ -21,117 +21,73 @@ class TokenType(IntEnum):
 
 
 class KarelTokens:
-    """Complete Karel DSL Token Management - FINAL VERSION"""
+    """Karel DSL Token Management - Updated with specific mapping, all functions maintained"""
     
     def __init__(self):
         self._define_tokens()
         self._create_mappings()
     
     def _define_tokens(self):
-        """Define ALL DSL tokens"""
+        """Define tokens in the exact order specified by the mapping"""
         
-        # Program structure tokens
-        self.structure_tokens = [
-            'DEF',           # 0
-            'run',           # 1
-            'm(',            # 2
-            'm)',            # 3
+        # Tokens in exact order from index 0-33 + PAD token
+        self.all_tokens = [
+            'DEF',              # 0
+            'run',              # 1
+            'm(',               # 2
+            'm)',               # 3
+            'move',             # 4
+            'turnLeft',         # 5
+            'turnRight',        # 6
+            'pickMarker',       # 7
+            'putMarker',        # 8
+            'REPEAT',           # 9
+            'r(',               # 10
+            'r)',               # 11
+            'R=2',              # 12
+            'R=3',              # 13
+            'R=4',              # 14
+            'R=5',              # 15
+            'IF',               # 16
+            'IFELSE',           # 17
+            'ELSE',             # 18
+            'i(',               # 19
+            'i)',               # 20
+            'e(',               # 21
+            'e)',               # 22
+            'frontIsClear',     # 23
+            'leftIsClear',      # 24
+            'rightIsClear',     # 25
+            'markersPresent',   # 26
+            'noMarkersPresent', # 27
+            'not',              # 28
+            'c(',               # 29
+            'c)',               # 30
+            'WHILE',            # 31
+            'w(',               # 32
+            'w)',               # 33
+            '<PAD>',            # 34 - Added back for padding functionality
         ]
-        
-        # Action tokens
-        self.action_tokens = [
-            'move',          # 4
-            'turnLeft',      # 5
-            'turnRight',     # 6
-            'pickMarker',    # 7
-            'putMarker',     # 8
-        ]
-        
-        # Control flow tokens
-        self.control_tokens = [
-            'REPEAT',        # 9
-            'TIMES',         # 10
-            'r(',            # 11
-            'r)',            # 12
-            'IF',            # 13
-            'THEN',          # 14
-            'IFELSE',        # 15
-            'ELSE',          # 16
-            'i(',            # 17
-            'i)',            # 18
-            'e(',            # 19
-            'e)',            # 20
-            'WHILE',         # 21
-            'DO',            # 22
-            'END',           # 23
-            'w(',            # 24
-            'w)',            # 25
-        ]
-        
-        # Number tokens
-        self.constant_tokens = [
-            '1',             # 26
-            '2',             # 27
-            '3',             # 28
-            '4',             # 29
-            '5',             # 30
-            'R=2',           # 31
-            'R=3',           # 32
-            'R=4',           # 33
-            'R=5',           # 34
-        ]
-        
-        # COMPLETE condition tokens - FIXED: Added ALL missing conditions
-        self.condition_tokens = [
-            'frontIsClear',      # 35
-            'leftIsClear',       # 36
-            'rightIsClear',      # 37
-            'backIsClear',       # 38 - ADDED
-            'markersPresent',    # 39
-            'noMarkersPresent',  # 40
-            'facingNorth',       # 41 - ADDED
-            'facingSouth',       # 42 - ADDED
-            'facingEast',        # 43 - ADDED
-            'facingWest',        # 44 - ADDED
-            'notFacingNorth',    # 45 - ADDED (this was the missing one!)
-            'notFacingSouth',    # 46 - ADDED
-            'notFacingEast',     # 47 - ADDED
-            'notFacingWest',     # 48 - ADDED
-        ]
-        
-        # Logical tokens
-        self.logical_tokens = [
-            'not',           # 49
-            'c(',            # 50
-            'c)',            # 51
-        ]
-        
-        # Padding token
-        self.padding_tokens = [
-            '<PAD>',         # 52
-        ]
-        
-        # Combine all tokens
-        self.all_tokens = (
-            self.structure_tokens +     # 0-3
-            self.action_tokens +        # 4-8
-            self.control_tokens +       # 9-25
-            self.constant_tokens +      # 26-34
-            self.condition_tokens +     # 35-48
-            self.logical_tokens +       # 49-51
-            self.padding_tokens         # 52
-        )
         
         self.vocab_size = len(self.all_tokens)
         
-        # Verify critical tokens
-        critical_tokens = ['DO', 'END', 'THEN', 'TIMES', 'notFacingNorth']
+        # Categorize tokens by type for reference (maintaining original structure)
+        self.structure_tokens = ['DEF', 'run', 'm(', 'm)']
+        self.action_tokens = ['move', 'turnLeft', 'turnRight', 'pickMarker', 'putMarker']
+        self.control_tokens = ['REPEAT', 'r(', 'r)', 'IF', 'IFELSE', 'ELSE', 'i(', 'i)', 'e(', 'e)', 'WHILE', 'w(', 'w)']
+        self.constant_tokens = ['R=2', 'R=3', 'R=4', 'R=5']
+        self.condition_tokens = ['frontIsClear', 'leftIsClear', 'rightIsClear', 'markersPresent', 'noMarkersPresent']
+        self.logical_tokens = ['not', 'c(', 'c)']
+        self.padding_tokens = ['<PAD>']
+        
+        # Verify critical tokens (adjusted for new vocabulary)
+        critical_tokens = ['WHILE', 'IF', 'REPEAT', 'frontIsClear']
         missing = [token for token in critical_tokens if token not in self.all_tokens]
         if missing:
-            raise ValueError(f"CRITICAL ERROR: Still missing tokens: {missing}")
+            raise ValueError(f"CRITICAL ERROR: Missing tokens: {missing}")
         
-        print(f"✅ FINAL complete vocabulary: {self.vocab_size} tokens")
-        print(f"✅ All critical tokens included: {critical_tokens}")
+        print(f"✅ Updated vocabulary: {self.vocab_size} tokens")
+        print(f"✅ Token mapping matches specified indices 0-33 + PAD at 34")
     
     def _create_mappings(self):
         """Create token-to-index and index-to-token mappings"""
@@ -157,7 +113,7 @@ class KarelTokens:
             self.token_types[token] = TokenType.PADDING
         
         # Bracket tokens
-        bracket_tokens = ['r(', 'r)', 'i(', 'i)', 'e(', 'e)', 'c(', 'c)', 'w(', 'w)']
+        bracket_tokens = ['r(', 'r)', 'i(', 'i)', 'e(', 'e)', 'c(', 'c)', 'w(', 'w)', 'm(', 'm)']
         for token in bracket_tokens:
             if token in self.all_tokens:
                 self.token_types[token] = TokenType.BRACKETS
@@ -202,15 +158,16 @@ class KarelTokens:
         }
     
     def test_all_default_programs(self):
-        """Test the exact programs used in inference"""
+        """Test basic Karel programs that work with the updated vocabulary"""
+        # Updated test programs to work with available tokens
         test_programs = [
-            "WHILE frontIsClear DO move END",
-            "REPEAT 3 TIMES move END",
-            "IF frontIsClear THEN move ELSE turnLeft END",
-            "WHILE notFacingNorth DO turnLeft END"  # This was failing!
+            "WHILE frontIsClear move",  # Simplified - no DO/END
+            "REPEAT R=3 move",          # Simplified - no TIMES/END  
+            "IF frontIsClear move ELSE turnLeft",  # Simplified - no THEN/END
+            "not frontIsClear"          # Basic negation
         ]
         
-        print("\n🧪 Testing ALL default inference programs:")
+        print("\n🧪 Testing updated Karel programs:")
         print("=" * 50)
         
         all_passed = True
@@ -234,14 +191,22 @@ class KarelTokens:
                 all_passed = False
             if perfect_match and not unknown_tokens:
                 print(f"   ✅ Perfect tokenization")
+                print(f"   Indices: {indices}")
         
         return all_passed
+    
+    def print_token_mapping(self):
+        """Print the complete token mapping for verification"""
+        print("\n📋 Complete Token Mapping:")
+        print("=" * 30)
+        for idx, token in enumerate(self.all_tokens):
+            print(f"{idx:2d}: '{token}'")
 
 
 # Create global instance
 karel_tokens = KarelTokens()
 
-# Export functions
+# Export functions - ALL ORIGINAL FUNCTIONS MAINTAINED
 def string_to_indices(program_string: str) -> List[int]:
     return karel_tokens.string_to_indices(program_string)
 
@@ -264,16 +229,29 @@ def pad_sequence(indices: List[int], max_length: int) -> List[int]:
 
 
 if __name__ == "__main__":
-    print("🚀 FINAL COMPLETE KAREL TOKENS")
+    print("🚀 KAREL TOKENS - Updated Mapping with All Functions")
     print("=" * 50)
     
     tokens = KarelTokens()
+    tokens.print_token_mapping()
+    
     success = tokens.test_all_default_programs()
     
-    print(f"\n📊 FINAL SUMMARY:")
+    print(f"\n📊 SUMMARY:")
     print(f"   Vocabulary size: {tokens.vocab_size}")
-    print(f"   All tests: {'✅ PASSED' if success else '❌ FAILED'}")
+    print(f"   Core mapping: indices 0-33 as specified")
+    print(f"   Padding token: index 34")
+    print(f"   All original functions: ✅ MAINTAINED")
+    print(f"   Basic tests: {'✅ PASSED' if success else '❌ FAILED'}")
+    
+    print(f"\n🔍 Available Functions:")
+    print(f"   - string_to_indices()")
+    print(f"   - indices_to_string()")
+    print(f"   - get_vocab_size()")
+    print(f"   - get_padding_index()")
+    print(f"   - pad_sequence()")
+    print(f"   - test_all_default_programs()")
+    print(f"   - get_vocab_info()")
     
     if success:
-        print(f"\n🎉 VOCABULARY IS NOW COMPLETELY FIXED!")
-        print(f"   No more missing token warnings should appear")
+        print(f"\n🎉 TOKEN MAPPING UPDATED WITH ALL FUNCTIONS PRESERVED!")
