@@ -1,509 +1,965 @@
 """
-Modern Karel Environment for HPRL
+Enhanced Karel World Implementation
 
-This module provides a clean Gymnasium-compatible environment for Karel tasks
-that can be used with the HPRL framework.
+This module contains the Karel world mechanics with all original tasks and reward functions
+while maintaining simplified architecture features.
 """
 
-import gymnasium as gym
 import numpy as np
-from typing import Tuple, Dict, Any, Optional, List, Union
-from gymnasium import spaces
+from typing import Tuple, Dict, List, Optional, Any
+from enum import IntEnum
+from collections import deque
+import copy
 
-from .karel_world import KarelWorld
-from .state_generator import KarelStateGenerator
+
+class Direction(IntEnum):
+    """Karel's facing directions"""
+    NORTH = 0
+    EAST = 1
+    SOUTH = 2
+    WEST = 3
 
 
-class KarelEnvironment(gym.Env):
+class Action(IntEnum):
+    """Karel's primitive actions"""
+    MOVE = 0
+    TURN_LEFT = 1
+    TURN_RIGHT = 2
+    PICK_MARKER = 3
+    PUT_MARKER = 4
+
+
+class KarelWorld:
     """
-    Modern Karel Environment compatible with Gymnasium API.
+    Enhanced Karel World implementation with all original tasks and reward functions.
     
-    This environment handles the execution of Karel programs and provides
-    rewards based on the specified task. It supports both single program
-    execution and hierarchical program composition (HPRL).
+    State representation: (H, W, 8) boolean array
+    - Channels 0-3: Agent direction (one-hot)
+    - Channel 4: Walls
+    - Channel 5: No markers (0 markers)
+    - Channel 6: 1 marker
+    - Channel 7: 2+ markers
     """
-    
-    metadata = {'render_modes': ['human', 'rgb_array']}
     
     def __init__(
-        self,
+        self, 
         task: str = 'harvester',
         grid_size: Tuple[int, int] = (8, 8),
-        max_episode_steps: int = 5,
-        max_program_length: int = 40,
-        vocab_size: int = 35,
         timeout_steps: int = 100,
-        reward_type: str = 'dense',
-        use_fixed_states: bool = True,
-        **kwargs
+        reward_diff: bool = False,
+        final_reward_scale: bool = True
     ):
-        """
-        Initialize Karel Environment
-        
-        Args:
-            task: Karel task type ('harvester', 'cleanHouse', 'fourCorners', etc.)
-            grid_size: (height, width) of the Karel grid
-            max_episode_steps: Maximum number of macro steps (program executions)
-            max_program_length: Maximum length of a program in tokens
-            vocab_size: Size of the program vocabulary
-            timeout_steps: Maximum primitive steps per program
-            reward_type: 'dense' or 'sparse' rewards
-            use_fixed_states: Whether to use fixed states for consistent training
-        """
-        super().__init__()
-        
         self.task = task
-        self.grid_size = grid_size
-        self.max_episode_steps = max_episode_steps
-        self.max_program_length = max_program_length
-        self.vocab_size = vocab_size
+        self.h, self.w = grid_size
         self.timeout_steps = timeout_steps
-        self.reward_type = reward_type
-        self.use_fixed_states = use_fixed_states
+        self.reward_diff = reward_diff
+        self.final_reward_scale = final_reward_scale
         
-        # Initialize Karel world and state generator
-        self.karel_world = KarelWorld(
-            task=task,
-            grid_size=grid_size,
-            timeout_steps=timeout_steps
-        )
-        
-        self.state_generator = KarelStateGenerator(
-            grid_size=grid_size,
-            task=task
-        )
-        
-        # Define observation and action spaces
-        self.observation_space = spaces.Box(
-            low=0,
-            high=1,
-            shape=(*grid_size, 8),  # Karel state channels
-            dtype=np.uint8
-        )
-        
-        # Action space: program tokens
-        self.action_space = spaces.Box(
-            low=0,
-            high=vocab_size,
-            shape=(max_program_length,),
-            dtype=np.int32
-        )
-        
-        # Episode tracking
-        self.current_step = 0
-        self.episode_reward = 0.0
-        self.episode_programs = []
-        
-        # Fixed states for consistent training (if enabled)
-        self.fixed_states = []
-        if use_fixed_states:
-            self._generate_fixed_states()
-    
-    def _generate_fixed_states(self):
-        """Generate fixed states for consistent training"""
-        self.fixed_states = []
-        for i in range(self.max_episode_steps + 1):
-            state, metadata = self.state_generator.generate_state(task_specific=True)
-            self.fixed_states.append((state, metadata))
-    
-    def reset(
-        self, 
-        seed: Optional[int] = None, 
-        options: Optional[Dict[str, Any]] = None
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Reset the environment to initial state
-        
-        Returns:
-            observation: Initial Karel state
-            info: Additional information
-        """
-        if seed is not None:
-            self.np_random = np.random.RandomState(seed)
-            
-        # Reset episode tracking
-        self.current_step = 0
-        self.episode_reward = 0.0
-        self.episode_programs = []
-        
-        # Get initial state
-        if self.use_fixed_states and self.fixed_states:
-            initial_state, metadata = self.fixed_states[0]
+        # Maximum markers per cell based on task
+        if task in ['topOff', 'topOff_sparse', 'randomMaze_key2door', 'randomMaze_key2door_sparse', 
+                   'randomMaze_key2doorSpace', 'randomMaze_key2doorSpace_sparse', 
+                   'doorkey', 'doorkey_sparse', 'seeder', 'seeder_sparse']:
+            self.max_markers = 2
         else:
-            initial_state, metadata = self.state_generator.generate_state(task_specific=True)
+            self.max_markers = 1
         
-        # Reset Karel world
-        observation = self.karel_world.reset(initial_state, metadata)
+        # State representation
+        self.state = np.zeros((self.h, self.w, 8), dtype=bool)
+        self.initial_state = None
+        self.metadata = {}
         
-        info = {
-            'step': self.current_step,
-            'episode_reward': self.episode_reward,
-            'task': self.task
-        }
+        # Execution tracking
+        self.step_count = 0
+        self.total_reward = 0.0
+        self.done = False
         
-        return observation, info
-    
-    def step(
-        self, 
-        action: Union[np.ndarray, List[int]]
-    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """
-        Execute a program in the Karel environment
+        # Progress tracking for rewards
+        self.progress_ratio = 0.0
+        self.prev_pos_reward = 0.0
+        self.init_pos_reward = 0.0
         
-        Args:
-            action: Program tokens (array of integers)
-            
-        Returns:
-            observation: New Karel state
-            reward: Reward for this step
-            terminated: Whether episode is done due to task completion
-            truncated: Whether episode is done due to step limit
-            info: Additional information
-        """
-        if isinstance(action, list):
-            action = np.array(action)
+        # Snake-specific tracking
+        self.snake_body = deque([(1, 1), (1, 2)])
+        self.snake_len = 2
+        self.snake_marker_pointer = 0
         
-        self.current_step += 1
+        # Position tracking for oneStroke
+        self.pos_h = []
+        self.pos_h_set = set()
         
-        # Parse and execute the program
-        program_reward, program_info = self._execute_program(action)
+        # History for visualization/debugging
+        self.state_history = []
+        self.action_history = []
+        self.reward_history = []
         
-        self.episode_reward += program_reward
-        self.episode_programs.append({
-            'tokens': action.copy(),
-            'reward': program_reward,
-            'info': program_info
-        })
-        
-        # Get next observation (either next fixed state or current world state)
-        if self.use_fixed_states and self.current_step < len(self.fixed_states):
-            observation = self.fixed_states[self.current_step % len(self.fixed_states)][0]
+    def reset(self, initial_state: Optional[np.ndarray] = None, metadata: Optional[Dict] = None) -> np.ndarray:
+        """Reset the Karel world to initial state"""
+        if initial_state is not None:
+            self.state = initial_state.copy()
         else:
-            observation = self.karel_world.get_state()
+            self._generate_random_state()
+            
+        self.initial_state = self.state.copy()
+        self.metadata = metadata or {}
+        
+        self.step_count = 0
+        self.total_reward = 0.0
+        self.done = False
+        
+        # Reset progress tracking
+        self.progress_ratio = 0.0
+        self.prev_pos_reward = 0.0
+        self.init_pos_reward = 0.0
+        
+        # Reset snake tracking
+        self.snake_body = deque([(1, 1), (1, 2)])
+        self.snake_len = 2
+        if 'marker_pointer' in self.metadata:
+            self.snake_marker_pointer = self.metadata['marker_pointer']
+        
+        # Reset position tracking
+        agent_pos = self._get_agent_position()
+        if agent_pos:
+            self.pos_h = [(agent_pos[0], agent_pos[1])]
+            self.pos_h_set = {(agent_pos[0], agent_pos[1])}
+        else:
+            self.pos_h = []
+            self.pos_h_set = set()
+        
+        self.state_history = [self.state.copy()]
+        self.action_history = []
+        self.reward_history = []
+        
+        return self.state.copy()
+    
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
+        """Execute one primitive action in the Karel world"""
+        if self.done:
+            return self.state.copy(), 0.0, True, {'timeout': True}
+            
+        self.step_count += 1
+        
+        # Execute action
+        success = self._execute_action(Action(action))
+        
+        # Calculate reward
+        reward = self._calculate_reward() if success else -0.1
         
         # Check termination conditions
-        terminated = self.karel_world.done or program_info.get('task_completed', False)
-        truncated = self.current_step >= self.max_episode_steps
+        self.done = self._check_done() or (self.step_count >= self.timeout_steps)
+        
+        # Update history
+        self.state_history.append(self.state.copy())
+        self.action_history.append(action)
+        self.reward_history.append(reward)
+        self.total_reward += reward
         
         info = {
-            'step': self.current_step,
-            'episode_reward': self.episode_reward,
-            'program_reward': program_reward,
-            'program_valid': program_info.get('valid', False),
-            'program_string': program_info.get('program_string', ''),
-            'execution_steps': program_info.get('execution_steps', 0),
-            'task_completed': program_info.get('task_completed', False),
-            'timeout': program_info.get('timeout', False)
+            'success': success,
+            'timeout': self.step_count >= self.timeout_steps,
+            'step_count': self.step_count,
+            'total_reward': self.total_reward
         }
         
-        return observation, program_reward, terminated, truncated, info
+        return self.state.copy(), reward, self.done, info
     
-    def _execute_program(self, program_tokens: np.ndarray) -> Tuple[float, Dict[str, Any]]:
-        """
-        Execute a program represented as tokens
-        
-        Args:
-            program_tokens: Array of program tokens
+    def _execute_action(self, action: Action) -> bool:
+        """Execute a primitive Karel action"""
+        agent_pos = self._get_agent_position()
+        if agent_pos is None:
+            return False
             
-        Returns:
-            reward: Reward for executing this program
-            info: Execution information
-        """
-        # Filter out padding tokens (assuming vocab_size-1 is padding)
-        valid_tokens = program_tokens[program_tokens < self.vocab_size - 1]
-        
-        if len(valid_tokens) == 0:
-            return -0.01, {  # Small penalty for empty programs
-                'valid': False,
-                'program_string': '',
-                'execution_steps': 0,
-                'task_completed': False,
-                'timeout': False
-            }
+        row, col, direction = agent_pos
         
         try:
-            # For now, we'll use a simple program execution strategy
-            # In a full implementation, this would use the DSL parser
-            reward, steps, completed = self._execute_simple_program(valid_tokens)
-            
-            return reward, {
-                'valid': True,
-                'program_string': self._tokens_to_string(valid_tokens),
-                'execution_steps': steps,
-                'task_completed': completed,
-                'timeout': steps >= self.timeout_steps
-            }
-            
-        except Exception as e:
-            return -0.01, {  # Penalty for invalid programs
-                'valid': False,
-                'program_string': self._tokens_to_string(valid_tokens),
-                'execution_steps': 0,
-                'task_completed': False,
-                'timeout': False,
-                'error': str(e)
-            }
+            if action == Action.MOVE:
+                return self._move_forward(row, col, direction)
+            elif action == Action.TURN_LEFT:
+                return self._turn_left(row, col, direction)
+            elif action == Action.TURN_RIGHT:
+                return self._turn_right(row, col, direction)
+            elif action == Action.PICK_MARKER:
+                return self._pick_marker(row, col)
+            elif action == Action.PUT_MARKER:
+                return self._put_marker(row, col)
+            else:
+                return False
+        except Exception:
+            return False
     
-    def _execute_simple_program(self, tokens: np.ndarray) -> Tuple[float, int, bool]:
-        """
-        Execute a simple program (placeholder implementation)
-        
-        In a full implementation, this would parse the DSL and execute properly.
-        For now, we'll execute basic action sequences.
-        
-        Args:
-            tokens: Valid program tokens
+    def _move_forward(self, row: int, col: int, direction: Direction) -> bool:
+        """Move Karel forward in the current direction"""
+        # Calculate new position
+        new_row, new_col = row, col
+        if direction == Direction.NORTH:
+            new_row = row - 1
+        elif direction == Direction.EAST:
+            new_col = col + 1
+        elif direction == Direction.SOUTH:
+            new_row = row + 1
+        elif direction == Direction.WEST:
+            new_col = col - 1
             
-        Returns:
-            reward: Total reward from execution
-            steps: Number of primitive steps executed
-            completed: Whether task was completed
-        """
-        # Token mapping (simplified)
-        # This would be replaced by proper DSL parsing
-        action_tokens = {
-            4: 0,   # 'move' -> MOVE
-            5: 1,   # 'turnLeft' -> TURN_LEFT  
-            6: 2,   # 'turnRight' -> TURN_RIGHT
-            7: 3,   # 'pickMarker' -> PICK_MARKER
-            8: 4,   # 'putMarker' -> PUT_MARKER
-        }
+        # Check bounds and walls
+        if (new_row < 0 or new_row >= self.h or 
+            new_col < 0 or new_col >= self.w or
+            self.state[new_row, new_col, 4]):  # Wall
+            return False
         
-        total_reward = 0.0
-        steps = 0
+        # Special handling for snake body collision
+        if self.task in ['snake', 'snake_sparse'] and self.state[new_row, new_col, 7]:
+            self.done = True
+            return False
+            
+        # Move agent
+        self.state[row, col, :4] = False
+        self.state[new_row, new_col, direction] = True
         
-        # Simple execution: just execute basic actions in sequence
-        for token in tokens:
-            if token in action_tokens and steps < self.timeout_steps:
-                action = action_tokens[token]
-                _, reward, done, info = self.karel_world.step(action)
-                total_reward += reward
-                steps += 1
+        # Update position tracking for oneStroke
+        if self.task in ['oneStroke', 'oneStroke_sparse']:
+            self.pos_h.append((new_row, new_col))
+            self.pos_h_set.add((new_row, new_col))
+            # Mark passed cell as wall
+            self.state[row, col, 7] = False
+            self.state[row, col, 6] = False
+            self.state[row, col, 5] = False
+            self.state[row, col, 4] = True  # Wall
+        
+        # Snake-specific movement handling
+        if self.task in ['snake', 'snake_sparse'] and not self.done:
+            self._handle_snake_movement(row, col, new_row, new_col)
+            
+        return True
+    
+    def _handle_snake_movement(self, old_row: int, old_col: int, new_row: int, new_col: int):
+        """Handle snake-specific movement mechanics"""
+        # Add old position to snake body
+        if (new_row, new_col) not in self.snake_body:
+            self.snake_body.append((old_row, old_col))
+        else:
+            self.done = True
+            return
+            
+        # Check if marker eaten
+        if self.state[new_row, new_col, 6] and self.snake_len < 22:
+            self.snake_len += 1
+            self.state[new_row, new_col, 6] = False
+            
+            # Generate new marker
+            if 'marker_list' in self.metadata:
+                attempts = 0
+                while attempts < 50:
+                    marker_pos = self.metadata['marker_list'][self.snake_marker_pointer]
+                    self.snake_marker_pointer = (self.snake_marker_pointer + 1) % len(self.metadata['marker_list'])
+                    if np.sum(self.state[marker_pos[0], marker_pos[1], :]) == 0:
+                        self.state[marker_pos[0], marker_pos[1], 6] = True
+                        break
+                    attempts += 1
+        
+        # Mark old position with double marker (snake body)
+        self.state[old_row, old_col, 7] = True
+        self.state[old_row, old_col, 6] = False
+        self.state[old_row, old_col, 5] = False
+        
+        # Remove tail if snake too long
+        if len(self.snake_body) > self.snake_len:
+            tail_pos = self.snake_body.popleft()
+            self.state[tail_pos[0], tail_pos[1], :] = False
+            self.state[tail_pos[0], tail_pos[1], 5] = True  # Empty
+    
+    def _turn_left(self, row: int, col: int, direction: Direction) -> bool:
+        """Turn Karel left"""
+        new_direction = Direction((direction - 1) % 4)
+        self.state[row, col, :4] = False
+        self.state[row, col, new_direction] = True
+        return True
+    
+    def _turn_right(self, row: int, col: int, direction: Direction) -> bool:
+        """Turn Karel right"""
+        new_direction = Direction((direction + 1) % 4)
+        self.state[row, col, :4] = False
+        self.state[row, col, new_direction] = True
+        return True
+    
+    def _pick_marker(self, row: int, col: int) -> bool:
+        """Pick up a marker from current position"""
+        if self.state[row, col, 5]:  # No markers
+            return False
+            
+        # Update marker count
+        if self.state[row, col, 6]:  # 1 marker -> 0 markers
+            self.state[row, col, 6] = False
+            self.state[row, col, 5] = True
+        elif self.state[row, col, 7]:  # 2+ markers -> 1 marker
+            self.state[row, col, 7] = False
+            self.state[row, col, 6] = True
+        else:
+            return False
+            
+        return True
+    
+    def _put_marker(self, row: int, col: int) -> bool:
+        """Put a marker at current position"""
+        # Update marker count
+        if self.state[row, col, 5]:  # 0 markers -> 1 marker
+            self.state[row, col, 5] = False
+            self.state[row, col, 6] = True
+        elif self.state[row, col, 6]:  # 1 marker -> 2+ markers
+            if self.max_markers > 1:
+                self.state[row, col, 6] = False
+                self.state[row, col, 7] = True
+            else:
+                return False  # Can't place more than 1 marker
+        else:
+            return False  # Already at max markers
+            
+        return True
+    
+    def _get_agent_position(self) -> Optional[Tuple[int, int, Direction]]:
+        """Get agent's current position and direction"""
+        agent_positions = np.where(self.state[:, :, :4])
+        if len(agent_positions[0]) == 0:
+            return None
+        
+        row, col, direction = agent_positions[0][0], agent_positions[1][0], agent_positions[2][0]
+        return row, col, Direction(direction)
+    
+    def _calculate_reward(self) -> float:
+        """Calculate reward based on the current task"""
+        agent_pos = self._get_agent_position()
+        if agent_pos is None:
+            return 0.0
+            
+        if self.task == 'harvester' or self.task == 'harvester_sparse':
+            return self._harvester_reward(agent_pos)
+        elif self.task == 'cleanHouse' or self.task == 'cleanHouse_sparse':
+            return self._clean_house_reward(agent_pos)
+        elif self.task == 'fourCorners' or self.task == 'fourCorners_sparse':
+            return self._four_corners_reward(agent_pos)
+        elif self.task == 'randomMaze' or self.task == 'randomMaze_sparse':
+            return self._random_maze_reward(agent_pos)
+        elif self.task == 'stairClimber' or self.task == 'stairClimber_sparse':
+            return self._stair_climber_reward(agent_pos)
+        elif self.task == 'topOff' or self.task == 'topOff_sparse':
+            return self._top_off_reward(agent_pos)
+        elif self.task == 'randomMaze_key2door' or self.task == 'randomMaze_key2door_sparse':
+            return self._key2door_reward(agent_pos)
+        elif self.task == 'randomMaze_key2doorSpace' or self.task == 'randomMaze_key2doorSpace_sparse':
+            return self._key2door_space_reward(agent_pos)
+        elif self.task == 'oneStroke' or self.task == 'oneStroke_sparse':
+            return self._one_stroke_reward(agent_pos)
+        elif self.task == 'doorkey' or self.task == 'doorkey_sparse':
+            return self._doorkey_reward(agent_pos)
+        elif self.task == 'seeder' or self.task == 'seeder_sparse':
+            return self._seeder_reward(agent_pos)
+        elif self.task == 'snake' or self.task == 'snake_sparse':
+            return self._snake_reward(agent_pos)
+        else:
+            return 0.0
+    
+    def _harvester_reward(self, agent_pos) -> float:
+        """Reward for harvester task: collect all markers"""
+        if self.done:
+            return 0.0
+            
+        total_markers = np.sum(self.state[:, :, 6:])
+        max_markers = (self.h - 2) * (self.w - 2)
+        
+        current_progress_ratio = (max_markers - total_markers) / float(max_markers)
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = total_markers == 0
+        reward = reward if self.task == 'harvester' else float(done)
+        self.done = self.done or done
+        return reward
+    
+    def _clean_house_reward(self, agent_pos) -> float:
+        """Reward for cleanHouse task: clean specific marked positions"""
+        if self.done:
+            return 0.0
+            
+        if 'marker_positions' not in self.metadata:
+            return 0.0
+            
+        pick_marker = 0
+        for mpos in self.metadata['marker_positions']:
+            if self.state[mpos[0], mpos[1], 5] and not self.state[mpos[0], mpos[1], 6]:
+                pick_marker += 1
                 
-                if done:
-                    break
+        current_progress_ratio = pick_marker / float(len(self.metadata['marker_positions']))
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
         
-        # Check if task is completed
-        completed = self.karel_world.done and not info.get('timeout', False)
-        
-        return total_reward, steps, completed
+        done = pick_marker == len(self.metadata['marker_positions'])
+        reward = reward if self.task == 'cleanHouse' else float(done)
+        self.done = self.done or done
+        return reward
     
-    def _tokens_to_string(self, tokens: np.ndarray) -> str:
-        """
-        Convert program tokens to string representation
-        
-        Args:
-            tokens: Program tokens
+    def _four_corners_reward(self, agent_pos) -> float:
+        """Reward for fourCorners task: place markers at corners"""
+        if self.done:
+            return 0.0
             
-        Returns:
-            String representation of the program
-        """
-        # Token to string mapping (simplified)
-        token_map = {
-            0: 'DEF', 1: 'run', 2: 'm(', 3: 'm)',
-            4: 'move', 5: 'turnLeft', 6: 'turnRight', 
-            7: 'pickMarker', 8: 'putMarker',
-            9: 'REPEAT', 10: 'r(', 11: 'r)', 
-            12: 'R=2', 13: 'R=3', 14: 'R=4', 15: 'R=5',
-            16: 'IF', 17: 'IFELSE', 18: 'ELSE',
-            19: 'i(', 20: 'i)', 21: 'e(', 22: 'e)',
-            23: 'frontIsClear', 24: 'leftIsClear', 25: 'rightIsClear',
-            26: 'markersPresent', 27: 'noMarkersPresent',
-            28: 'not', 29: 'c(', 30: 'c)',
-            31: 'WHILE', 32: 'w(', 33: 'w)',
-        }
+        correct_markers = 0
+        if self.state[1, 1, 6]:
+            correct_markers += 1
+        if self.state[self.h-2, 1, 6]:
+            correct_markers += 1
+        if self.state[self.h-2, self.w-2, 6]:
+            correct_markers += 1
+        if self.state[1, self.w-2, 6]:
+            correct_markers += 1
+            
+        total_markers = np.sum(self.state[:, :, 6:])
+        incorrect_markers = total_markers - correct_markers
         
-        return ' '.join(token_map.get(token, f'UNK_{token}') for token in tokens)
+        current_progress_ratio = correct_markers / 4.0
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        if incorrect_markers > 0 and reward > 0.0:
+            reward = 0.0
+            
+        done = correct_markers == 4 or incorrect_markers > 0
+        
+        if self.task == 'fourCorners_sparse':
+            reward = reward if done and not self.done else 0
+        self.done = self.done or done
+        return reward
+    
+    def _random_maze_reward(self, agent_pos) -> float:
+        """Reward for randomMaze task: reach the marker"""
+        if self.done:
+            return 0.0
+            
+        if 'marker_positions' not in self.metadata or len(self.metadata['marker_positions']) == 0:
+            return 0.0
+            
+        # Find initial marker position from initial state
+        x, y = np.where(self.initial_state[:, :, 6] > 0)
+        if len(x) != 1:
+            return 0.0
+            
+        marker_pos = np.array([x[0], y[0]])
+        distance_to_goal = -1 * (abs(agent_pos[0] - marker_pos[0]) + abs(agent_pos[1] - marker_pos[1]))
+        
+        done = distance_to_goal == 0
+        reward = float(done)
+        self.done = self.done or done
+        return reward
+    
+    def _stair_climber_reward(self, agent_pos) -> float:
+        """Reward for stairClimber task: reach the marker"""
+        if self.done:
+            return 0.0
+            
+        # Find initial marker position
+        x, y = np.where(self.initial_state[:, :, 6] > 0)
+        if len(x) != 1:
+            return 0.0
+            
+        marker_pos = np.array([x[0], y[0]])
+        reward = -1 * (abs(agent_pos[0] - marker_pos[0]) + abs(agent_pos[1] - marker_pos[1]))
+        
+        # Initial agent position for longest distance calculation
+        x_init, y_init, z_init = np.where(self.initial_state[:, :, :4] > 0)
+        init_pos = np.array([x_init[0], y_init[0]])
+        longest_distance = abs(init_pos[0] - marker_pos[0]) + abs(init_pos[1] - marker_pos[1])
+        
+        # Initialize prev_pos_reward on first step
+        if len(self.state_history) == 2:
+            self.prev_pos_reward = -1 * (abs(init_pos[0] - marker_pos[0]) + abs(init_pos[1] - marker_pos[1]))
+            
+        if self.reward_diff:
+            abs_reward = reward
+            if 'agent_valid_positions' in self.metadata:
+                reward = self.prev_pos_reward - 1.0 if tuple(agent_pos[:2]) not in self.metadata['agent_valid_positions'] else reward
+            reward = (reward - self.prev_pos_reward) / longest_distance
+            self.prev_pos_reward = abs_reward
+            done = abs_reward == 0
+        else:
+            done = reward == 0
+            
+        reward = reward if self.task == 'stairClimber' else float(done)
+        if self.task == 'stairClimber_sparse':
+            reward = reward if done and not self.done else 0
+        self.done = self.done or done
+        return reward
+    
+    def _top_off_reward(self, agent_pos) -> float:
+        """Reward for topOff task: fill bottom row and reach end"""
+        if self.done:
+            return 0.0
+            
+        score = 0
+        
+        for c in range(1, agent_pos[1] + 1):
+            if 'not_expected_marker_positions' in self.metadata:
+                if (self.h-2, c) in self.metadata['not_expected_marker_positions']:
+                    if self.state[self.h-2, c, 7]:
+                        score += 1
+                    else:
+                        break
+            elif 'expected_marker_positions' in self.metadata:
+                if (self.h-2, c) in self.metadata['expected_marker_positions']:
+                    if self.state[self.h-2, c, 5]:
+                        score += 1
+                    else:
+                        break
+                        
+        if (self.w - 2 == agent_pos[1] and self.h - 2 == agent_pos[0]) and score == self.w - 2:
+            score += 1
+            
+        current_progress_ratio = score / (self.w - 1)
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = False
+        if 'not_expected_marker_positions' in self.metadata:
+            expected_filled = sum([self.state[pos[0], pos[1], 7] for pos in self.metadata['not_expected_marker_positions']])
+            done = (expected_filled == len(self.metadata['not_expected_marker_positions']) and 
+                   (self.w - 2 == agent_pos[1] and self.h - 2 == agent_pos[0]) and 
+                   current_progress_ratio == 1.0)
+        
+        reward = reward if self.task == 'topOff' else float(done)
+        if self.task == 'topOff_sparse':
+            reward = reward if done and not self.done else 0
+        self.done = self.done or done
+        return reward
+    
+    def _key2door_reward(self, agent_pos) -> float:
+        """Reward for randomMaze_key2door task"""
+        if self.done:
+            return 0.0
+            
+        total_markers = np.sum(self.state[:, :, 6:])
+        error_markers = total_markers - 2
+        score = 0
+        
+        if self.state[6, 3, 5]:  # Key picked
+            score += 0.5
+        if self.state[6, 3, 5] and self.state[1, 6, 7]:  # Key picked and door marked
+            score += 0.5
+            
+        if error_markers > 0:
+            score -= error_markers * 0.0001
+            
+        current_progress_ratio = score
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = (current_progress_ratio == 1.0)
+        reward = reward if self.task == 'randomMaze_key2door' else float(done)
+        if self.task == 'randomMaze_key2door_sparse':
+            reward = reward if done and not self.done else 0
+        self.done = self.done or done
+        return reward
+    
+    def _key2door_space_reward(self, agent_pos) -> float:
+        """Reward for randomMaze_key2doorSpace task"""
+        if self.done:
+            return 0.0
+            
+        total_markers = np.sum(self.state[:, :, 6:])
+        error_markers = total_markers - 2
+        score = 0
+        
+        if self.state[6, 3, 5]:  # Key picked
+            score += 0.5
+        if self.state[6, 3, 5] and self.state[1, 6, 7]:  # Key picked and door marked
+            score += 0.5
+            
+        if error_markers > 0:
+            score -= error_markers * 0.0001
+            
+        current_progress_ratio = score
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = (current_progress_ratio == 1.0)
+        reward = reward if self.task == 'randomMaze_key2doorSpace' else float(done)
+        if self.task == 'randomMaze_key2doorSpace_sparse':
+            reward = reward if done and not self.done else 0
+        self.done = self.done or done
+        return reward
+    
+    def _one_stroke_reward(self, agent_pos) -> float:
+        """Reward for oneStroke task: traverse all cells exactly once"""
+        if self.done:
+            return 0.0
+            
+        pos_tuple = tuple(agent_pos[:2])
+        
+        is_overlap = pos_tuple in self.pos_h_set and pos_tuple != self.pos_h[-1] if self.pos_h else False
+        is_hit_wall = (len(self.action_history) > 0 and self.action_history[-1] == 0 and 
+                      pos_tuple == self.pos_h[-1] if self.pos_h else False)
+        traverse_length = len(self.pos_h_set)
+        
+        max_markers = (self.w - 2) * (self.h - 2)
+        
+        current_progress_ratio = traverse_length / float(max_markers)
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = is_overlap or is_hit_wall or traverse_length == max_markers
+        reward = reward if self.task == 'oneStroke' else float(done)
+        self.done = self.done or done
+        return reward
+    
+    def _doorkey_reward(self, agent_pos) -> float:
+        """Reward for doorkey task: generic key-door puzzle"""
+        if self.done:
+            return 0.0
+            
+        if 'key' not in self.metadata or 'target' not in self.metadata:
+            return 0.0
+            
+        total_markers = np.sum(self.state[:, :, 6:])
+        error_markers = total_markers - 2
+        score = 0
+        
+        key_pos = self.metadata['key']
+        target_pos = self.metadata['target']
+        
+        if self.state[key_pos[0], key_pos[1], 5]:  # Key picked
+            score += 0.5
+        if self.state[key_pos[0], key_pos[1], 5] and self.state[target_pos[0], target_pos[1], 7]:  # Key picked and target marked
+            score += 0.5
+            
+        # Open door if key picked
+        if self.state[key_pos[0], key_pos[1], 5] and 'door_positions' in self.metadata:
+            for door_pos in self.metadata['door_positions']:
+                self.state[door_pos[0], door_pos[1], 4] = False
+                
+        if error_markers > 0:
+            score -= error_markers * 0.0001
+            
+        current_progress_ratio = score
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = (current_progress_ratio == 1.0)
+        reward = reward if self.task == 'doorkey' else float(done)
+        if self.task == 'doorkey_sparse':
+            reward = reward if done and not self.done else 0
+        self.done = self.done or done
+        return reward
+    
+    def _seeder_reward(self, agent_pos) -> float:
+        """Reward for seeder task: place exactly one marker in each valid cell"""
+        if self.done:
+            return 0.0
+            
+        existing_marker_num = len(self.metadata.get('existing_marker', []))
+        max_markers = (self.w - 2) * (self.h - 2) - existing_marker_num
+        
+        total_one_markers = np.sum(self.state[:, :, 6])
+        total_two_markers = np.sum(self.state[:, :, 7])
+        
+        score = total_one_markers - existing_marker_num
+        
+        current_progress_ratio = score / float(max_markers)
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = (total_one_markers == max_markers and total_two_markers == 0) or total_two_markers > 0
+        reward = reward if self.task == 'seeder' else float(done)
+        self.done = self.done or done
+        return reward
+    
+    def _snake_reward(self, agent_pos) -> float:
+        """Reward for snake task: eat markers to grow while avoiding body collision"""
+        if self.done:
+            return 0.0
+            
+        is_hit_body = self.state[agent_pos[0], agent_pos[1], 7]
+        
+        current_progress_ratio = (self.snake_len - 2) / 20.0
+        reward = current_progress_ratio - self.progress_ratio
+        self.progress_ratio = current_progress_ratio
+        
+        done = is_hit_body or current_progress_ratio >= 0.99
+        reward = reward if self.task == 'snake' else float(done)
+        self.done = self.done or done
+        return reward
+    
+    def _check_done(self) -> bool:
+        """Check if the task is completed"""
+        if self.task == 'harvester' or self.task == 'harvester_sparse':
+            return np.sum(self.state[:, :, 6:]) == 0
+        elif self.task == 'cleanHouse' or self.task == 'cleanHouse_sparse':
+            if 'marker_positions' not in self.metadata:
+                return False
+            return all(self.state[pos[0], pos[1], 5] for pos in self.metadata['marker_positions'])
+        elif self.task == 'fourCorners' or self.task == 'fourCorners_sparse':
+            corners = [(1, 1), (1, self.w-2), (self.h-2, 1), (self.h-2, self.w-2)]
+            correct = sum(1 for corner in corners if self.state[corner[0], corner[1], 6])
+            total_markers = np.sum(self.state[:, :, 6:])
+            return correct == 4 or total_markers > 4
+        elif self.task == 'randomMaze' or self.task == 'randomMaze_sparse':
+            # Find initial marker position
+            x, y = np.where(self.initial_state[:, :, 6] > 0)
+            if len(x) != 1:
+                return False
+            marker_pos = (x[0], y[0])
+            agent_pos = self._get_agent_position()
+            return (agent_pos is not None and 
+                   agent_pos[0] == marker_pos[0] and 
+                   agent_pos[1] == marker_pos[1])
+        elif self.task == 'stairClimber' or self.task == 'stairClimber_sparse':
+            # Find initial marker position
+            x, y = np.where(self.initial_state[:, :, 6] > 0)
+            if len(x) != 1:
+                return False
+            marker_pos = (x[0], y[0])
+            agent_pos = self._get_agent_position()
+            return (agent_pos is not None and 
+                   agent_pos[0] == marker_pos[0] and 
+                   agent_pos[1] == marker_pos[1])
+        elif self.task == 'topOff' or self.task == 'topOff_sparse':
+            if 'not_expected_marker_positions' in self.metadata:
+                expected_filled = sum([self.state[pos[0], pos[1], 7] for pos in self.metadata['not_expected_marker_positions']])
+                agent_pos = self._get_agent_position()
+                return (expected_filled == len(self.metadata['not_expected_marker_positions']) and 
+                       agent_pos is not None and
+                       self.w - 2 == agent_pos[1] and self.h - 2 == agent_pos[0])
+            return False
+        elif self.task == 'randomMaze_key2door' or self.task == 'randomMaze_key2door_sparse':
+            return self.state[6, 3, 5] and self.state[1, 6, 7]
+        elif self.task == 'randomMaze_key2doorSpace' or self.task == 'randomMaze_key2doorSpace_sparse':
+            return self.state[6, 3, 5] and self.state[1, 6, 7]
+        elif self.task == 'oneStroke' or self.task == 'oneStroke_sparse':
+            pos_tuple = tuple(self._get_agent_position()[:2]) if self._get_agent_position() else None
+            if pos_tuple is None:
+                return False
+            is_overlap = pos_tuple in self.pos_h_set and pos_tuple != self.pos_h[-1] if self.pos_h else False
+            is_hit_wall = (len(self.action_history) > 0 and self.action_history[-1] == 0 and 
+                          pos_tuple == self.pos_h[-1] if self.pos_h else False)
+            traverse_length = len(self.pos_h_set)
+            max_markers = (self.w - 2) * (self.h - 2)
+            return is_overlap or is_hit_wall or traverse_length == max_markers
+        elif self.task == 'doorkey' or self.task == 'doorkey_sparse':
+            if 'key' not in self.metadata or 'target' not in self.metadata:
+                return False
+            key_pos = self.metadata['key']
+            target_pos = self.metadata['target']
+            return self.state[key_pos[0], key_pos[1], 5] and self.state[target_pos[0], target_pos[1], 7]
+        elif self.task == 'seeder' or self.task == 'seeder_sparse':
+            existing_marker_num = len(self.metadata.get('existing_marker', []))
+            max_markers = (self.w - 2) * (self.h - 2) - existing_marker_num
+            total_one_markers = np.sum(self.state[:, :, 6])
+            total_two_markers = np.sum(self.state[:, :, 7])
+            return (total_one_markers == max_markers and total_two_markers == 0) or total_two_markers > 0
+        elif self.task == 'snake' or self.task == 'snake_sparse':
+            agent_pos = self._get_agent_position()
+            if agent_pos is None:
+                return False
+            is_hit_body = self.state[agent_pos[0], agent_pos[1], 7]
+            current_progress_ratio = (self.snake_len - 2) / 20.0
+            return is_hit_body or current_progress_ratio >= 0.99
+        else:
+            return False
+    
+    def _generate_random_state(self):
+        """Generate a random initial state (placeholder implementation)"""
+        # Reset state
+        self.state.fill(False)
+        
+        # Add walls around perimeter
+        self.state[0, :, 4] = True  # Top wall
+        self.state[-1, :, 4] = True  # Bottom wall
+        self.state[:, 0, 4] = True  # Left wall
+        self.state[:, -1, 4] = True  # Right wall
+        
+        # Place agent randomly (not on walls)
+        agent_row = np.random.randint(1, self.h - 1)
+        agent_col = np.random.randint(1, self.w - 1)
+        agent_dir = np.random.randint(0, 4)
+        self.state[agent_row, agent_col, agent_dir] = True
+        
+        # Initialize all empty positions with "no markers"
+        for r in range(1, self.h - 1):
+            for c in range(1, self.w - 1):
+                if not self.state[r, c, :4].any():  # Not agent position
+                    self.state[r, c, 5] = True  # No markers
+    
+    # Perception functions for DSL
+    def front_is_clear(self) -> bool:
+        """Check if front is clear"""
+        agent_pos = self._get_agent_position()
+        if agent_pos is None:
+            return False
+            
+        row, col, direction = agent_pos
+        
+        if direction == Direction.NORTH:
+            new_row, new_col = row - 1, col
+        elif direction == Direction.EAST:
+            new_row, new_col = row, col + 1
+        elif direction == Direction.SOUTH:
+            new_row, new_col = row + 1, col
+        else:  # WEST
+            new_row, new_col = row, col - 1
+            
+        return (0 <= new_row < self.h and 0 <= new_col < self.w and 
+                not self.state[new_row, new_col, 4])
+    
+    def left_is_clear(self) -> bool:
+        """Check if left is clear"""
+        agent_pos = self._get_agent_position()
+        if agent_pos is None:
+            return False
+            
+        row, col, direction = agent_pos
+        left_direction = Direction((direction - 1) % 4)
+        
+        if left_direction == Direction.NORTH:
+            new_row, new_col = row - 1, col
+        elif left_direction == Direction.EAST:
+            new_row, new_col = row, col + 1
+        elif left_direction == Direction.SOUTH:
+            new_row, new_col = row + 1, col
+        else:  # WEST
+            new_row, new_col = row, col - 1
+            
+        return (0 <= new_row < self.h and 0 <= new_col < self.w and 
+                not self.state[new_row, new_col, 4])
+    
+    def right_is_clear(self) -> bool:
+        """Check if right is clear"""
+        agent_pos = self._get_agent_position()
+        if agent_pos is None:
+            return False
+            
+        row, col, direction = agent_pos
+        right_direction = Direction((direction + 1) % 4)
+        
+        if right_direction == Direction.NORTH:
+            new_row, new_col = row - 1, col
+        elif right_direction == Direction.EAST:
+            new_row, new_col = row, col + 1
+        elif right_direction == Direction.SOUTH:
+            new_row, new_col = row + 1, col
+        else:  # WEST
+            new_row, new_col = row, col - 1
+            
+        return (0 <= new_row < self.h and 0 <= new_col < self.w and 
+                not self.state[new_row, new_col, 4])
+    
+    def marker_present(self) -> bool:
+        """Check if marker is present at current position"""
+        agent_pos = self._get_agent_position()
+        if agent_pos is None:
+            return False
+            
+        row, col, _ = agent_pos
+        return self.state[row, col, 6] or self.state[row, col, 7]  # 1 or 2+ markers
+    
+    def no_marker_present(self) -> bool:
+        """Check if no marker is present at current position"""
+        return not self.marker_present()
+    
+    def get_state(self) -> np.ndarray:
+        """Get current state"""
+        return self.state.copy()
     
     def render(self, mode: str = 'human') -> Optional[np.ndarray]:
-        """Render the environment"""
-        return self.karel_world.render(mode)
+        """Render the current state"""
+        if mode == 'human':
+            self._print_state()
+            return None
+        elif mode == 'rgb_array':
+            return self._state_to_image()
+        else:
+            return self.state.copy()
     
-    def close(self):
-        """Clean up resources"""
-        pass
+    def _print_state(self):
+        """Print ASCII representation of the state"""
+        agent_symbols = {Direction.NORTH: '^', Direction.EAST: '>', 
+                        Direction.SOUTH: 'v', Direction.WEST: '<'}
+        
+        for row in range(self.h):
+            line = ""
+            for col in range(self.w):
+                if self.state[row, col, 4]:  # Wall
+                    line += "█"
+                elif self.state[row, col, :4].any():  # Agent
+                    direction = np.argmax(self.state[row, col, :4])
+                    line += agent_symbols[Direction(direction)]
+                elif self.state[row, col, 6]:  # 1 marker
+                    line += "●"
+                elif self.state[row, col, 7]:  # 2+ markers
+                    line += "◉"
+                else:  # Empty
+                    line += "."
+            print(line)
+        print()
     
-    def get_episode_info(self) -> Dict[str, Any]:
-        """Get comprehensive episode information"""
-        return {
-            'episode_reward': self.episode_reward,
-            'episode_length': self.current_step,
-            'programs_executed': len(self.episode_programs),
-            'task': self.task,
-            'programs': self.episode_programs,
-            'task_completed': self.karel_world.done
-        }
+    def _state_to_image(self) -> np.ndarray:
+        """Convert state to RGB image (placeholder)"""
+        # This would return an RGB image representation
+        # For now, return a simple grayscale version
+        img = np.zeros((self.h, self.w, 3), dtype=np.uint8)
+        
+        for row in range(self.h):
+            for col in range(self.w):
+                if self.state[row, col, 4]:  # Wall
+                    img[row, col] = [64, 64, 64]  # Gray
+                elif self.state[row, col, :4].any():  # Agent
+                    img[row, col] = [0, 255, 0]  # Green
+                elif self.state[row, col, 6]:  # 1 marker
+                    img[row, col] = [255, 0, 0]  # Red
+                elif self.state[row, col, 7]:  # 2+ markers
+                    img[row, col] = [255, 165, 0]  # Orange
+                else:  # Empty
+                    img[row, col] = [255, 255, 255]  # White
+                    
+        return img
 
 
-class HPRLKarelEnvironment(KarelEnvironment):
-    """
-    HPRL-specific Karel Environment
+# Example usage and testing
+if __name__ == "__main__":
+    # Test basic functionality
+    world = KarelWorld(task='harvester', grid_size=(6, 6))
     
-    This extends the base Karel environment with HPRL-specific features:
-    - Program embedding action space
-    - Integration with VAE decoder
-    - Hierarchical program composition
-    """
+    # Create a simple test state
+    test_state = np.zeros((6, 6, 8), dtype=bool)
     
-    def __init__(
-        self,
-        vae_decoder=None,
-        latent_dim: int = 64,
-        deterministic_decoder: bool = True,
-        **kwargs
-    ):
-        """
-        Initialize HPRL Karel Environment
-        
-        Args:
-            vae_decoder: Pre-trained VAE decoder for converting embeddings to programs
-            latent_dim: Dimension of program embeddings
-            deterministic_decoder: Whether to use deterministic decoding
-            **kwargs: Additional arguments for base KarelEnvironment
-        """
-        super().__init__(**kwargs)
-        
-        self.vae_decoder = vae_decoder
-        self.latent_dim = latent_dim
-        self.deterministic_decoder = deterministic_decoder
-        
-        # Override action space to be program embeddings
-        self.action_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(latent_dim,),
-            dtype=np.float32
-        )
+    # Add walls around perimeter
+    test_state[0, :, 4] = True
+    test_state[-1, :, 4] = True
+    test_state[:, 0, 4] = True
+    test_state[:, -1, 4] = True
     
-    def step(
-        self, 
-        action: np.ndarray
-    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """
-        Execute a program embedding in the Karel environment
-        
-        Args:
-            action: Program embedding (latent vector)
-            
-        Returns:
-            observation: New Karel state
-            reward: Reward for this step
-            terminated: Whether episode is done due to task completion
-            truncated: Whether episode is done due to step limit
-            info: Additional information
-        """
-        if self.vae_decoder is None:
-            raise ValueError("VAE decoder not provided for HPRL environment")
-        
-        # Convert embedding to program tokens using VAE decoder
-        program_tokens = self._decode_program(action)
-        
-        # Execute the decoded program
-        return super().step(program_tokens)
+    # Place agent at (1, 1) facing north
+    test_state[1, 1, 0] = True
     
-    def _decode_program(self, embedding: np.ndarray) -> np.ndarray:
-        """
-        Decode program embedding to tokens using VAE decoder
-        
-        Args:
-            embedding: Program embedding vector
-            
-        Returns:
-            Program tokens
-        """
-        import torch
-        
-        # Convert to torch tensor
-        if isinstance(embedding, np.ndarray):
-            embedding = torch.from_numpy(embedding).float()
-        
-        # Add batch dimension if needed
-        if embedding.dim() == 1:
-            embedding = embedding.unsqueeze(0)
-        
-        # Decode using VAE
-        with torch.no_grad():
-            self.vae_decoder.eval()
-            
-            # Apply tanh if needed (as in original code)
-            if hasattr(self.vae_decoder, 'tanh') and self.vae_decoder.tanh is not None:
-                embedding = self.vae_decoder.tanh(embedding)
-            
-            # Decode to program tokens
-            decoder_output = self.vae_decoder.decoder(
-                None, 
-                embedding, 
-                teacher_enforcing=False,
-                deterministic=self.deterministic_decoder,
-                evaluate=False
-            )
-            
-            # Extract program tokens from decoder output
-            _, pred_programs, pred_programs_len, *_ = decoder_output
-            
-            # Convert to numpy
-            program_tokens = pred_programs[0].cpu().numpy()
-            program_length = pred_programs_len[0].cpu().numpy()
-            
-            # Truncate to actual length
-            program_tokens = program_tokens[:program_length]
-        
-        return program_tokens
+    # Place some markers
+    test_state[2, 2, 6] = True  # 1 marker
+    test_state[3, 3, 6] = True  # 1 marker
     
-    def set_vae_decoder(self, vae_decoder):
-        """Set the VAE decoder for program decoding"""
-        self.vae_decoder = vae_decoder
-
-
-# Factory function for creating environments
-def make_karel_env(
-    task: str = 'harvester',
-    env_type: str = 'standard',
-    **kwargs
-) -> KarelEnvironment:
-    """
-    Factory function for creating Karel environments
+    # Initialize empty cells
+    for r in range(1, 5):
+        for c in range(1, 5):
+            if not test_state[r, c, :].any():
+                test_state[r, c, 5] = True
     
-    Args:
-        task: Karel task type
-        env_type: 'standard' or 'hprl'
-        **kwargs: Additional environment arguments
+    # Reset world with test state
+    state = world.reset(test_state)
+    print("Initial state:")
+    world.render()
+    
+    # Test some actions
+    actions = [Action.MOVE, Action.MOVE, Action.PICK_MARKER, Action.TURN_RIGHT, Action.MOVE]
+    
+    for i, action in enumerate(actions):
+        state, reward, done, info = world.step(action.value)
+        print(f"Step {i+1}: Action={action.name}, Reward={reward:.3f}, Done={done}")
+        world.render()
         
-    Returns:
-        Karel environment instance
-    """
-    if env_type == 'standard':
-        return KarelEnvironment(task=task, **kwargs)
-    elif env_type == 'hprl':
-        return HPRLKarelEnvironment(task=task, **kwargs)
-    else:
-        raise ValueError(f"Unknown environment type: {env_type}")
-
-
-# Register environments with Gymnasium
-def register_karel_envs():
-    """Register Karel environments with Gymnasium"""
-    from gymnasium.envs.registration import register
+        if done:
+            break
     
-    # Standard Karel environments
-    tasks = ['harvester', 'cleanHouse', 'fourCorners', 'stairClimber', 'topOff', 'randomMaze']
-    
-    for task in tasks:
-        register(
-            id=f'Karel-{task}-v0',
-            entry_point='karel_env:KarelEnvironment',
-            kwargs={'task': task}
-        )
-        
-        register(
-            id=f'Karel-{task}-HPRL-v0',
-            entry_point='karel_env:HPRLKarelEnvironment',
-            kwargs={'task': task}
-        )
-
-
-# Auto-register environments when module is imported
-try:
-    register_karel_envs()
-except:
-    pass  # Ignore registration errors
+    print(f"Total reward: {world.total_reward:.3f}")
+    print(f"Steps taken: {world.step_count}")
