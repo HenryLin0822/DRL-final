@@ -18,7 +18,7 @@ from typing import List, Dict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dsl.karel_dsl import get_DSL_option_v2
-from dsl.tokens import get_vocab_size, get_padding_index
+from dsl.tokens import get_vocab_size, get_padding_index, KarelTokens
 
 def emergency_data_analysis():
     """Emergency analysis of training data quality"""
@@ -27,9 +27,9 @@ def emergency_data_analysis():
     
     # Initialize DSL
     dsl = get_DSL_option_v2(seed=42)
-    
+    karel = KarelTokens()
     # Find dataset
-    datadir = "./data/karel_dataset_option_L30_1m_cover_branch"
+    datadir = "./small_data"
     if not os.path.exists(datadir):
         print(f"❌ Data directory not found: {datadir}")
         return
@@ -50,10 +50,11 @@ def emergency_data_analysis():
                 id_file = open(id_file_path, 'r')
                 id_list = id_file.readlines()[:100]  # More samples
                 
-                for program_id in id_list:
-                    program_id = program_id.strip().split()[0]
-                    program = hdf5_file[program_id]['program'][()]
-                    
+                for line in id_list:
+                    program_id = line.strip().split()[0]
+                    #program = hdf5_file[program_id]['program'][()]
+                    program =  karel.string_to_indices(line.replace(program_id,""))
+                    program = np.array(program, dtype=np.int8)
                     # Convert to string and analyze
                     try:
                         program_str = dsl.intseq2str(program)

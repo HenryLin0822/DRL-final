@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.config import config
 from dsl.karel_dsl import get_DSL_option_v2
+from dsl.tokens import KarelTokens
 class ProgramDataset(Dataset):
     """Karel programs dataset."""
 
@@ -128,9 +129,10 @@ def make_datasets(datadir, config, num_program_tokens, num_agent_actions, device
     r_eq_program_count = 0
     drop_program_count = 0
     seen_programs = set()
-
+    karel = KarelTokens()
 
     print("Loading data from: ", datadir)
+    #print_1 = 0
     for file_name in tqdm(os.listdir(datadir)):
         if file_name.endswith("hdf5"):
             f_path = os.path.join(datadir, file_name)
@@ -141,9 +143,16 @@ def make_datasets(datadir, config, num_program_tokens, num_agent_actions, device
             hdf5_file = h5py.File(f_path, 'r')
             id_file = open(id_file_path, 'r')
             id_list = id_file.readlines()
-            for program_id in id_list:
-                program_id = program_id.strip().split()[0]
-                program = hdf5_file[program_id]['program'][()]
+            #print(id_list[0].replace(id_list[0].strip().split()[0],""))
+            for line in id_list:
+                program_id = line.strip().split()[0]
+                #program = hdf5_file[program_id]['program'][()]
+                program =  karel.string_to_indices(line.replace(program_id,""))
+                program = np.array(program, dtype=np.int8)
+                '''if print_1 == 0:
+                    print(type(program))
+                    print(program)
+                    print_1 = 1'''
                 valid_flag = True 
                 
                 random_code_str = dsl.intseq2str(program)
@@ -178,7 +187,7 @@ def make_datasets(datadir, config, num_program_tokens, num_agent_actions, device
 
 
 if __name__ == "__main__":
-        datadir = "../data/karel_dataset_option_L30_1m_cover_branch"
+        datadir = "../small_data"
         config = config
         dsl = get_DSL_option_v2(seed=config['seed'], environment=config['rl']['envs']['executable']['name'])
         config['dsl']['num_agent_actions'] = len(dsl.action_functions) + 1  
