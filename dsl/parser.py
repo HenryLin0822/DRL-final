@@ -587,7 +587,10 @@ class KarelDSLParser:
                 return False, program.error_message
         except Exception as e:
             return False, f"Validation error: {str(e)}"
-
+    def intseq2str(self, indices: List[int]) -> str:
+        """Convert list of token indices to program string"""
+        tokens = self.tokens.indices_to_tokens(indices)
+        return self.tokens.tokens_to_string(tokens)
 
 # Create global instance
 karel_dsl = KarelDSLParser()

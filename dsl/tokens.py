@@ -201,6 +201,65 @@ class KarelTokens:
         print("=" * 30)
         for idx, token in enumerate(self.all_tokens):
             print(f"{idx:2d}: '{token}'")
+    def validate_tokens(self, token_list: List[str]) -> Tuple[bool, str]:
+        """
+        Validate that all tokens in the list are known tokens
+        
+        Args:
+            token_list: List of token strings to validate
+            
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        unknown_tokens = []
+        
+        for token in token_list:
+            if token not in self.token_to_idx:
+                unknown_tokens.append(token)
+        
+        if unknown_tokens:
+            return False, f"Unknown tokens: {unknown_tokens}"
+        
+        return True, ""
+
+    def extract_statement(self, token_list: List[str]) -> List[str]:
+        """
+        Extract statement tokens from a program (remove DEF run m( ... m))
+        
+        Args:
+            token_list: Full program token list
+            
+        Returns:
+            Statement tokens without the program structure wrapper
+        """
+        if len(token_list) < 4:
+            return []
+        
+        # Check if it starts with DEF run m( and ends with m)
+        if (token_list[0] == 'DEF' and 
+            token_list[1] == 'run' and 
+            token_list[2] == 'm(' and 
+            token_list[-1] == 'm)'):
+            # Return everything between m( and m)
+            return token_list[3:-1]
+        else:
+            # Return as-is if not proper program structure
+            return token_list
+
+    def is_valid_program_start(self, tokens: List[str]) -> bool:
+        """Check if program starts with DEF run m("""
+        return (len(tokens) >= 3 and 
+                tokens[0] == 'DEF' and 
+                tokens[1] == 'run' and 
+                tokens[2] == 'm(')
+
+    def is_valid_program_end(self, tokens: List[str]) -> bool:
+        """Check if program ends with m)"""
+        return len(tokens) > 0 and tokens[-1] == 'm)'
+
+    def filter_padding(self, tokens: List[str]) -> List[str]:
+        """Remove padding tokens from token list"""
+        return [token for token in tokens if token != '<PAD>']
 
 
 # Create global instance
@@ -227,6 +286,20 @@ def pad_sequence(indices: List[int], max_length: int) -> List[int]:
         padding_idx = get_padding_index()
         return indices + [padding_idx] * padding_needed
 
+def validate_tokens(token_list: List[str]) -> Tuple[bool, str]:
+    return karel_tokens.validate_tokens(token_list)
+
+def extract_statement(token_list: List[str]) -> List[str]:
+    return karel_tokens.extract_statement(token_list)
+
+def is_valid_program_start(tokens: List[str]) -> bool:
+    return karel_tokens.is_valid_program_start(tokens)
+
+def is_valid_program_end(tokens: List[str]) -> bool:
+    return karel_tokens.is_valid_program_end(tokens)
+
+def filter_padding(tokens: List[str]) -> List[str]:
+    return karel_tokens.filter_padding(tokens)
 
 if __name__ == "__main__":
     print("🚀 KAREL TOKENS - Updated Mapping with All Functions")
