@@ -47,7 +47,7 @@ class KarelWorld:
         self, 
         task: str = 'harvester',
         grid_size = (8, 8),
-        timeout_steps: int = 100,
+        timeout_steps: int = 500,
         reward_diff: bool = False,
         final_reward_scale: bool = True
     ):
@@ -176,7 +176,7 @@ class KarelWorld:
             return False
             
         row, col, direction = agent_pos
-        
+        print(action)
         try:
             if action == Action.MOVE:
                 return self._move_forward(row, col, direction)
@@ -210,6 +210,7 @@ class KarelWorld:
         if (new_row < 0 or new_row >= self.h or 
             new_col < 0 or new_col >= self.w or
             self.state[new_row, new_col, 4]):  # Wall
+            print("move failed, wall or out of bounds")
             return False
         
         # Special handling for snake body collision
@@ -234,7 +235,7 @@ class KarelWorld:
         # Snake-specific movement handling
         if self.task in ['snake', 'snake_sparse'] and not self.done:
             self._handle_snake_movement(row, col, new_row, new_col)
-            
+        #print("True")
         return True
     
     def _handle_snake_movement(self, old_row: int, old_col: int, new_row: int, new_col: int):
@@ -370,7 +371,7 @@ class KarelWorld:
             
         total_markers = np.sum(self.state[:, :, 6:])
         max_markers = (self.h - 2) * (self.w - 2)
-        
+        print("total_markers:", total_markers, "max_markers:", max_markers)
         current_progress_ratio = (max_markers - total_markers) / float(max_markers)
         reward = current_progress_ratio - self.progress_ratio
         self.progress_ratio = current_progress_ratio
@@ -388,12 +389,13 @@ class KarelWorld:
         # Compare current state with initial state to find which positions had markers
         initial_markers = self.initial_state[:, :, 6] | self.initial_state[:, :, 7]
         current_markers = self.state[:, :, 6] | self.state[:, :, 7]
-        
+        print("sum:",np.sum(initial_markers))
         # Count positions that had markers initially but are now empty
         cleaned_positions = initial_markers & (~current_markers)
         total_initial_markers = np.sum(initial_markers)
         
         if total_initial_markers == 0:
+            print("No initial markers found, returning 0 reward")
             return 0.0
             
         current_progress_ratio = np.sum(cleaned_positions) / float(total_initial_markers)
@@ -409,7 +411,7 @@ class KarelWorld:
         """Reward for fourCorners task: place markers at corners"""
         if self.done:
             return 0.0
-            
+        print("metadata",self.metadata)
         correct_markers = 0
         if self.state[1, 1, 6]:
             correct_markers += 1
@@ -419,8 +421,10 @@ class KarelWorld:
             correct_markers += 1
         if self.state[1, self.w-2, 6]:
             correct_markers += 1
-            
-        total_markers = np.sum(self.state[:, :, 6:])
+        print("correct_markers:", correct_markers)
+        #total_markers = np.sum(self.state[:, :, 6:])
+        total_markers = 4
+        print("total_markers:", total_markers)
         incorrect_markers = total_markers - correct_markers
         
         current_progress_ratio = correct_markers / 4.0
@@ -439,20 +443,24 @@ class KarelWorld:
     
     def _random_maze_reward(self, agent_pos) -> float:
         """Reward for randomMaze task: reach the marker"""
+        print("metadata",self.metadata)
+        print("self.done",self.done)
         if self.done:
             return 0.0
             
         if 'marker_positions' not in self.metadata or len(self.metadata['marker_positions']) == 0:
+            #print("metadata",self.metadata)
             return 0.0
             
         # Find initial marker position from initial state
         x, y = np.where(self.initial_state[:, :, 6] > 0)
+        print("x, y", x, y)
         if len(x) != 1:
             return 0.0
             
         marker_pos = np.array([x[0], y[0]])
         distance_to_goal = -1 * (abs(agent_pos[0] - marker_pos[0]) + abs(agent_pos[1] - marker_pos[1]))
-        
+        print("distance_to_goal", distance_to_goal)
         done = distance_to_goal == 0
         reward = float(done)
         self.done = self.done or done
