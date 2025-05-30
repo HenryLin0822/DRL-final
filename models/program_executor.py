@@ -59,11 +59,13 @@ class ProgramExecutor(nn.Module):
         self.timeout_penalty = timeout_penalty
         self.device = device
         
-        # Initialize DSL and parser
-        self.dsl = KarelDSL()
-        self.parser = KarelDSLParser()
+        # Initialize DSL and parser - USE KarelDSLParser for execution
+        self.dsl = KarelDSLParser()  # This has execute() method
         self.tokens = karel_tokens
-        
+        # ADD THESE DEBUG LINES:
+        print(f"DEBUG INIT: DSL type is {type(self.dsl)}")
+        print(f"DEBUG INIT: DSL has execute: {hasattr(self.dsl, 'execute')}")
+        print(f"DEBUG INIT: DSL methods: {[m for m in dir(self.dsl) if not m.startswith('_')]}")
         # Action mapping from DSL tokens to environment actions
         self.action_mapping = {
             'move': 0,
@@ -275,7 +277,7 @@ class ProgramExecutor(nn.Module):
     def execute_with_dsl(
         self,
         program_tokens: torch.Tensor,
-        karel_env: KarelEnvironment,
+        karel_world,  # KarelWorld object directly (not KarelEnvironment)
         return_traces: bool = True
     ) -> Dict[str, Any]:
         """
@@ -283,7 +285,7 @@ class ProgramExecutor(nn.Module):
         
         Args:
             program_tokens: [seq_len] - tokenized program
-            karel_env: Karel environment
+            karel_world: KarelWorld instance (from renderer)
             return_traces: Whether to return execution traces
             
         Returns:
@@ -308,12 +310,52 @@ class ProgramExecutor(nn.Module):
                 'error': 'Empty program'
             }
         
+        # Convert indices to token names for validation
+        token_names = []
+        for idx in valid_indices:
+            if hasattr(self.tokens, 'idx_to_token') and idx in self.tokens.idx_to_token:
+                token_names.append(self.tokens.idx_to_token[idx])
+            else:
+                token_names.append(f'UNK_{idx}')
+        
+        # Validate DSL format
         try:
-            # Convert indices to program string
-            program_string = self.dsl.intseq2str(valid_indices)
+            validation_result = self._validate_dsl_format(valid_indices, token_names)
+            if not validation_result['valid']:
+                return {
+                    'states': [],
+                    'actions': [],
+                    'action_length': 0,
+                    'total_reward': self.timeout_penalty,
+                    'success': False,
+                    'error': f'Invalid DSL format: {validation_result["error"]}'
+                }
+        except Exception as e:
+            return {
+                'states': [],
+                'actions': [],
+                'action_length': 0,
+                'total_reward': self.timeout_penalty,
+                'success': False,
+                'error': f'Validation error: {str(e)}'
+            }
+        
+        try:
+            # Convert indices to program string using tokens
+            program_string = self.tokens.indices_to_string(valid_indices)
+            print(f"DEBUG: Program string: {program_string}")
             
-            # Validate program
+            # First, let's see if the program parses correctly
+            parsed_program = self.dsl.parse(program_string)
+            print(f"DEBUG: Parsed program valid: {parsed_program.is_valid}")
+            print(f"DEBUG: Parsed program error: {parsed_program.error_message}")
+            print(f"DEBUG: Parsed statements: {len(parsed_program.statements) if parsed_program.is_valid else 0}")
+            if parsed_program.is_valid:
+                print(f"DEBUG: Statement types: {[stmt.get('type', 'unknown') for stmt in parsed_program.statements]}")
+            
+            # Validate program using DSL parser
             valid, error_msg = self.dsl.validate_program(program_string)
+            print(f"DEBUG: Program validation: {valid}, error: {error_msg}")
             if not valid:
                 return {
                     'states': [],
@@ -324,37 +366,179 @@ class ProgramExecutor(nn.Module):
                     'error': f'Invalid program: {error_msg}'
                 }
             
-            # Reset environment
-            karel_env.reset()
+            # Reset karel world
+            karel_world.reset()
+            print(f"DEBUG: Karel world reset, initial step count: {karel_world.step_count}")
             
-            # Execute using DSL
-            execution_trace = self.dsl.run(karel_env.karel_world, program_string)
+            # Execute using DSL parser - this returns execution trace
+            print(f"DEBUG: About to execute program with DSL...")
+            try:
+                execution_trace = self.dsl.execute(program_string, karel_world)
+                print(f"DEBUG: Execution complete")
+                print(f"DEBUG: Execution trace type: {type(execution_trace)}")
+                print(f"DEBUG: Execution trace length: {len(execution_trace) if execution_trace else 'None'}")
+                print(f"DEBUG: Karel world step count after: {karel_world.step_count}")
+                print(f"DEBUG: Karel world done: {karel_world.done}")
+                
+            except (ParseError, ExecutionError) as e:
+                print(f"DEBUG: DSL ParseError/ExecutionError: {e}")
+                return {
+                    'states': [],
+                    'actions': [],
+                    'action_length': 0,
+                    'total_reward': self.timeout_penalty,
+                    'success': False,
+                    'error': f'DSL execution error: {str(e)}'
+                }
+            except Exception as e:
+                print(f"DEBUG: Other exception in DSL execute: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    'states': [],
+                    'actions': [],
+                    'action_length': 0,
+                    'total_reward': self.timeout_penalty,
+                    'success': False,
+                    'error': f'Execution error: {str(e)}'
+                }
             
-            # Extract actions from execution trace
-            actions = self._extract_actions_from_trace(execution_trace)
+            if execution_trace is None:
+                print(f"DEBUG: DSL execution returned None - this should not happen")
+                return {
+                    'states': [],
+                    'actions': [],
+                    'action_length': 0,
+                    'total_reward': self.timeout_penalty,
+                    'success': False,
+                    'error': 'DSL execution returned None'
+                }
             
-            # Calculate reward
-            total_reward = karel_env.karel_world.get_reward()
-            success = karel_env.karel_world.done and not karel_env.karel_world.timeout
+            # Calculate results
+            total_reward = karel_world.total_reward if hasattr(karel_world, 'total_reward') else 0.0
+            success = karel_world.done if hasattr(karel_world, 'done') else False
+            step_count = karel_world.step_count if hasattr(karel_world, 'step_count') else 0
+            
+            print(f"DEBUG: Final results - reward: {total_reward}, success: {success}, steps: {step_count}")
             
             return {
                 'states': execution_trace if return_traces else [],
-                'actions': actions,
-                'action_length': len(actions),
+                'actions': [],  # DSL doesn't track individual actions easily
+                'action_length': step_count,
                 'total_reward': total_reward,
                 'success': success,
                 'error': None
             }
             
-        except (ParseError, ExecutionError, RuntimeError) as e:
+        except Exception as e:
+            print(f"DEBUG: Outer exception: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'states': [],
                 'actions': [],
                 'action_length': 0,
                 'total_reward': self.timeout_penalty,
                 'success': False,
-                'error': str(e)
+                'error': f'Execution error: {str(e)}'
             }
+    
+    def _validate_dsl_format(self, token_indices: List[int], token_names: List[str]) -> Dict[str, Any]:
+        """
+        Strictly validate DSL format - must start with DEF run m(...) and have matched brackets
+        
+        Returns:
+            Dictionary with 'valid' boolean and 'error' message
+        """
+        if len(token_indices) < 4:
+            return {
+                'valid': False,
+                'error': 'Program too short. Minimum format: DEF run m( <statement> m)'
+            }
+        
+        # Must start with DEF run m(
+        if token_indices[0] != 0:  # DEF
+            return {
+                'valid': False,
+                'error': f'Program must start with DEF, found: {token_names[0]}'
+            }
+        
+        if token_indices[1] != 1:  # run
+            return {
+                'valid': False,
+                'error': f'Second token must be run, found: {token_names[1]}'
+            }
+        
+        if token_indices[2] != 2:  # m(
+            return {
+                'valid': False,
+                'error': f'Third token must be m(, found: {token_names[2]}'
+            }
+        
+        # Must end with m)
+        if token_indices[-1] != 3:  # m)
+            return {
+                'valid': False,
+                'error': f'Program must end with m), found: {token_names[-1]}'
+            }
+        
+        # Validate bracket matching
+        bracket_result = self._validate_bracket_matching(token_names)
+        if not bracket_result['valid']:
+            return bracket_result
+        
+        return {'valid': True, 'error': ''}
+    
+    def _validate_bracket_matching(self, token_names: List[str]) -> Dict[str, Any]:
+        """
+        Validate that all brackets are properly matched
+        
+        Returns:
+            Dictionary with 'valid' boolean and 'error' message  
+        """
+        # Define bracket pairs
+        bracket_pairs = {
+            'm(': 'm)',
+            'r(': 'r)',
+            'i(': 'i)', 
+            'e(': 'e)',
+            'c(': 'c)',
+            'w(': 'w)'
+        }
+        
+        # Stack for tracking open brackets
+        bracket_stack = []
+        
+        for i, token in enumerate(token_names):
+            if token in bracket_pairs:  # Opening bracket
+                bracket_stack.append((token, i))
+            elif token in bracket_pairs.values():  # Closing bracket
+                if not bracket_stack:
+                    return {
+                        'valid': False,
+                        'error': f'Closing bracket {token} at position {i} has no matching opening bracket'
+                    }
+                
+                last_open, open_pos = bracket_stack[-1]
+                expected_close = bracket_pairs[last_open]
+                
+                if token != expected_close:
+                    return {
+                        'valid': False,
+                        'error': f'Mismatched brackets: {last_open} at position {open_pos} should close with {expected_close}, found {token} at position {i}'
+                    }
+                
+                bracket_stack.pop()
+        
+        # All brackets should be matched
+        if bracket_stack:
+            unmatched = [f'{bracket} at position {pos}' for bracket, pos in bracket_stack]
+            return {
+                'valid': False,
+                'error': f'Unmatched opening brackets: {", ".join(unmatched)}'
+            }
+        
+        return {'valid': True, 'error': ''}
     
     def _extract_actions_from_trace(self, execution_trace: List[np.ndarray]) -> List[int]:
         """
@@ -444,7 +628,7 @@ class ProgramExecutor(nn.Module):
         
         for program_str in programs:
             # Convert to tokens
-            program_tokens = self.dsl.str2intseq(program_str)
+            program_tokens = self.tokens.string_to_indices(program_str)
             
             for demo_idx in range(num_demos_per_program):
                 # Create fresh environment
