@@ -491,88 +491,186 @@ class ProgramVAE(nn.Module):
             return logits.argmax(dim=-1)
         else:
             return torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1)
-    
+        
+    def generate_program_pure(self, latent, max_length=None, deterministic=True, temperature=1.0):
+        """
+        Generate a program from latent representation WITHOUT teacher forcing
+        
+        Args:
+            latent: [batch_size, latent_dim] - latent vectors
+            max_length: maximum program length
+            deterministic: whether to use greedy decoding
+            temperature: sampling temperature (if not deterministic)
+        
+        Returns:
+            generated_tokens: [batch_size, seq_len] - generated program tokens
+        """
+        max_length = max_length or self.max_program_length
+        batch_size = latent.size(0)
+        device = latent.device
+        
+        # Initialize decoder
+        current_token = torch.zeros(batch_size, dtype=torch.long, device=device)  # SOS
+        hidden_state = self.vae.decoder.latent_to_hidden(latent)
+        
+        if self.vae.decoder.rnn_type == 'LSTM':
+            hidden_state = (hidden_state, hidden_state)
+        
+        generated_tokens = []
+        
+        with torch.no_grad():
+            for step in range(max_length):
+                # Forward step
+                logits, hidden_state = self.vae.decoder.forward_step(
+                    current_token, latent, hidden_state
+                )
+                
+                # Sample next token
+                if deterministic:
+                    next_token = torch.argmax(logits, dim=-1)
+                else:
+                    # Temperature sampling
+                    scaled_logits = logits / temperature
+                    probs = F.softmax(scaled_logits, dim=-1)
+                    next_token = torch.multinomial(probs, 1).squeeze(-1)
+                
+                generated_tokens.append(next_token)
+                current_token = next_token
+                
+                # Stop if all sequences generated EOS
+                if torch.all(next_token == 1):  # Assuming EOS is token 1
+                    break
+        
+        # Stack tokens
+        if generated_tokens:
+            return torch.stack(generated_tokens, dim=1)
+        else:
+            return torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+
+    def pure_generation_loss(self, batch_size: int, vocab_size: int, padding_idx: int) -> torch.Tensor:
+        """
+        Pure generation training loss - trains decoder to generate coherent programs
+        from random latent vectors WITHOUT any teacher forcing
+        """
+        # Sample random latent vectors
+        random_latents = torch.randn(batch_size, self.latent_dim, device=next(self.parameters()).device)
+        
+        try:
+            # Generate tokens WITHOUT teacher forcing
+            generated_tokens = self.generate_program_pure(
+                random_latents, 
+                deterministic=False, 
+                temperature=0.8
+            )
+            
+            # Create simple target structure for coherence
+            target_tokens = torch.zeros_like(generated_tokens)
+            seq_len = generated_tokens.size(1)
+            
+            # Encourage basic program structure: SOS -> simple content -> EOS -> PAD
+            target_tokens[:, 0] = 0  # SOS
+            if seq_len > 1:
+                target_tokens[:, 1] = 1  # EOS (minimal valid program)
+            if seq_len > 2:
+                target_tokens[:, 2:] = padding_idx  # PAD
+            
+            # Compute generation loss
+            gen_loss = F.cross_entropy(
+                generated_tokens.float(),  # Convert to float for loss
+                target_tokens,
+                ignore_index=padding_idx,
+                reduction='mean'
+            )
+            
+            return gen_loss
+            
+        except Exception as e:
+            # Return zero loss if generation fails
+            device = next(self.parameters()).device
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
     def encode_program(self, programs, program_lengths):
         """Encode programs to latent space."""
         mu, logvar = self.vae.encode(programs, program_lengths)
         return self.vae.reparameterize(mu, logvar)
     
     def loss(self, programs, program_lengths, target_programs, states=None, 
-             target_actions=None, beta=1.0, action_weight=1.0):
+            target_actions=None, beta=1.0, action_weight=1.0, use_teacher_forcing=False):
         """
-        FIXED: Compute total loss with KL collapse prevention
+        IMPROVED: Compute total loss WITHOUT teacher forcing by default
         
         Args:
+            programs: input programs for encoding
+            target_programs: target programs for reconstruction loss
+            use_teacher_forcing: if True, use teacher forcing (for compatibility)
             beta: weight for KL divergence loss
             action_weight: weight for action prediction loss
         """
-        results = self.forward(programs, program_lengths, states, target_actions, target_programs)
         
-        # Reconstruction loss - handle variable length sequences
-        batch_size, seq_len, vocab_size = results['program_logits'].shape
+        # Encode programs to latent space
+        mu, logvar = self.vae.encode(programs, program_lengths)
+        latent = self.vae.reparameterize(mu, logvar)
+        
+        # Decode WITHOUT teacher forcing (default behavior)
+        if use_teacher_forcing:
+            # Old behavior for compatibility
+            program_logits, program_log_probs = self.vae.decode(latent, target_programs, deterministic=False)
+        else:
+            # NEW: Pure generation without teacher forcing
+            program_logits, program_log_probs = self.vae.decode(latent, target_programs=None, deterministic=False)
+        
+        # Reconstruction loss - compare generated programs with targets
+        batch_size, seq_len, vocab_size = program_logits.shape
         target_seq_len = target_programs.size(1)
         
-        # Truncate or pad to match sequence lengths
+        # Match sequence lengths
         min_len = min(seq_len, target_seq_len)
-        program_logits_truncated = results['program_logits'][:, :min_len, :]
+        program_logits_truncated = program_logits[:, :min_len, :]
         target_programs_truncated = target_programs[:, :min_len]
         
-        # Create mask for valid positions based on program lengths
+        # Create mask for valid positions
         mask = torch.arange(min_len, device=program_lengths.device).unsqueeze(0) < program_lengths.unsqueeze(1)
         
-        # Only compute loss on valid positions
+        # Compute reconstruction loss only on valid positions
         valid_positions = mask.flatten()
         if valid_positions.sum() > 0:
             valid_logits = program_logits_truncated.reshape(-1, vocab_size)[valid_positions]
             valid_targets = target_programs_truncated.flatten()[valid_positions]
             recon_loss = F.cross_entropy(valid_logits, valid_targets, reduction='mean')
         else:
-            recon_loss = torch.tensor(0.0, device=programs.device)
+            recon_loss = torch.tensor(0.0, device=programs.device, requires_grad=True)
         
         # KL divergence loss
-        kl_loss = results['kl_loss']
+        kl_loss = self.vae.kl_loss(mu, logvar)
         
         # CRITICAL: Enforce minimum KL loss to prevent collapse
         kl_regularization = torch.tensor(0.0, device=programs.device)
         if kl_loss < self.min_kl_loss and beta > 0.1:
             kl_regularization = self.kl_regularization_weight * (self.min_kl_loss - kl_loss)
-            # Log this intervention
-            if hasattr(self, '_log_kl_regularization'):
-                self._log_kl_regularization = True
         
         total_loss = recon_loss + beta * kl_loss + kl_regularization
         
         # Action prediction loss (if applicable)
         action_loss = torch.tensor(0.0, device=programs.device)
-        #print(results['action_logits'])
-        #print("target_actions",target_actions)
-        if 'action_logits' in results and target_actions is not None:
-            # Debug shapes to understand the mismatch
-            action_logits = results['action_logits']  # [batch_size, num_demos, num_actions, seq_len-1]
+        if states is not None and target_actions is not None and action_weight > 0:
+            # Compute policy forward pass
+            action_logits, action_log_probs = self.condition_policy(
+                states, latent, target_actions, deterministic=False
+            )
             
-            # Transpose last two dimensions to get [batch_size, num_demos, seq_len-1, num_actions]
+            # Compute action loss
             action_logits_transposed = action_logits.transpose(-2, -1)
-            
-            # Get the actual sequence length from action logits
             actual_action_seq_len = action_logits_transposed.size(2)
             target_action_seq_len = target_actions.size(2)
             
-            # Match sequence lengths
             min_action_len = min(actual_action_seq_len, target_action_seq_len)
             action_logits_matched = action_logits_transposed[:, :, :min_action_len, :]
             target_actions_matched = target_actions[:, :, :min_action_len]
             
-            # Reshape for cross entropy: flatten batch and demo dimensions
             action_logits_flat = action_logits_matched.reshape(-1, action_logits_matched.size(-1))
             target_actions_flat = target_actions_matched.reshape(-1)
             
-            action_loss = F.cross_entropy(
-                action_logits_flat,
-                target_actions_flat,
-                reduction='mean'
-            )
-            #print("action weight:", action_weight)
-            #print("action loss:", action_loss)
+            action_loss = F.cross_entropy(action_logits_flat, target_actions_flat, reduction='mean')
             total_loss += action_weight * action_loss
         
         loss_dict = {
@@ -580,10 +678,11 @@ class ProgramVAE(nn.Module):
             'recon_loss': recon_loss,
             'kl_loss': kl_loss,
             'action_loss': action_loss,
-            'kl_regularization': kl_regularization
+            'kl_regularization': kl_regularization,
+            'teacher_forcing_used': use_teacher_forcing
         }
         
-        # ADDED: Include diagnostics in loss output
+        # Include diagnostics
         if hasattr(self.vae, 'kl_diagnostics'):
             loss_dict['diagnostics'] = self.vae.kl_diagnostics.copy()
         

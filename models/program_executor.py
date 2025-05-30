@@ -63,9 +63,9 @@ class ProgramExecutor(nn.Module):
         self.dsl = KarelDSLParser()  # This has execute() method
         self.tokens = karel_tokens
         # ADD THESE DEBUG LINES:
-        print(f"DEBUG INIT: DSL type is {type(self.dsl)}")
-        print(f"DEBUG INIT: DSL has execute: {hasattr(self.dsl, 'execute')}")
-        print(f"DEBUG INIT: DSL methods: {[m for m in dir(self.dsl) if not m.startswith('_')]}")
+        #print(f"DEBUG INIT: DSL type is {type(self.dsl)}")
+        #print(f"DEBUG INIT: DSL has execute: {hasattr(self.dsl, 'execute')}")
+        #print(f"DEBUG INIT: DSL methods: {[m for m in dir(self.dsl) if not m.startswith('_')]}")
         # Action mapping from DSL tokens to environment actions
         self.action_mapping = {
             'move': 0,
@@ -343,19 +343,19 @@ class ProgramExecutor(nn.Module):
         try:
             # Convert indices to program string using tokens
             program_string = self.tokens.indices_to_string(valid_indices)
-            print(f"DEBUG: Program string: {program_string}")
+            #print(f"DEBUG: Program string: {program_string}")
             
             # First, let's see if the program parses correctly
             parsed_program = self.dsl.parse(program_string)
-            print(f"DEBUG: Parsed program valid: {parsed_program.is_valid}")
-            print(f"DEBUG: Parsed program error: {parsed_program.error_message}")
-            print(f"DEBUG: Parsed statements: {len(parsed_program.statements) if parsed_program.is_valid else 0}")
+            #print(f"DEBUG: Parsed program valid: {parsed_program.is_valid}")
+            #print(f"DEBUG: Parsed program error: {parsed_program.error_message}")
+            #print(f"DEBUG: Parsed statements: {len(parsed_program.statements) if parsed_program.is_valid else 0}")
             if parsed_program.is_valid:
                 print(f"DEBUG: Statement types: {[stmt.get('type', 'unknown') for stmt in parsed_program.statements]}")
             
             # Validate program using DSL parser
             valid, error_msg = self.dsl.validate_program(program_string)
-            print(f"DEBUG: Program validation: {valid}, error: {error_msg}")
+            #print(f"DEBUG: Program validation: {valid}, error: {error_msg}")
             if not valid:
                 return {
                     'states': [],
@@ -367,24 +367,24 @@ class ProgramExecutor(nn.Module):
                 }
             
             # Reset karel world
-            print("karel world state before reset:", karel_world.state[:,:,6])
+            #print("karel world state before reset:", karel_world.state[:,:,6])
             karel_world.reset()
-            print(f"DEBUG: Karel world reset, initial step count: {karel_world.step_count}")
+            #print(f"DEBUG: Karel world reset, initial step count: {karel_world.step_count}")
             
             # Execute using DSL parser - this returns execution trace
-            print(f"DEBUG: About to execute program with DSL...")
+            #print(f"DEBUG: About to execute program with DSL...")
             try:
-                print("program string:", program_string)
-                print("karel world state before execute:", karel_world.state[:,:,6])
+                #print("program string:", program_string)
+                #print("karel world state before execute:", karel_world.state[:,:,6])
                 execution_trace = self.dsl.execute(program_string, karel_world)
-                print(f"DEBUG: Execution complete")
-                print(f"DEBUG: Execution trace type: {type(execution_trace)}")
-                print(f"DEBUG: Execution trace length: {len(execution_trace) if execution_trace else 'None'}")
-                print(f"DEBUG: Karel world step count after: {karel_world.step_count}")
-                print(f"DEBUG: Karel world done: {karel_world.done}")
+                #print(f"DEBUG: Execution complete")
+                #print(f"DEBUG: Execution trace type: {type(execution_trace)}")
+                #print(f"DEBUG: Execution trace length: {len(execution_trace) if execution_trace else 'None'}")
+                #print(f"DEBUG: Karel world step count after: {karel_world.step_count}")
+                #print(f"DEBUG: Karel world done: {karel_world.done}")
                 
             except (ParseError, ExecutionError) as e:
-                print(f"DEBUG: DSL ParseError/ExecutionError: {e}")
+                #print(f"DEBUG: DSL ParseError/ExecutionError: {e}")
                 return {
                     'states': [],
                     'actions': [],
@@ -394,7 +394,7 @@ class ProgramExecutor(nn.Module):
                     'error': f'DSL execution error: {str(e)}'
                 }
             except Exception as e:
-                print(f"DEBUG: Other exception in DSL execute: {e}")
+                #print(f"DEBUG: Other exception in DSL execute: {e}")
                 import traceback
                 traceback.print_exc()
                 return {
@@ -407,7 +407,7 @@ class ProgramExecutor(nn.Module):
                 }
             
             if execution_trace is None:
-                print(f"DEBUG: DSL execution returned None - this should not happen")
+                #print(f"DEBUG: DSL execution returned None - this should not happen")
                 return {
                     'states': [],
                     'actions': [],
@@ -545,7 +545,7 @@ class ProgramExecutor(nn.Module):
             }
         
         return {'valid': True, 'error': ''}
-    
+    '''
     def _extract_actions_from_trace(self, execution_trace: List[np.ndarray]) -> List[int]:
         """
         Extract action sequence from execution trace
@@ -559,7 +559,7 @@ class ProgramExecutor(nn.Module):
         # This is a simplified version - in practice, you'd need to 
         # track the actual actions executed during the trace
         # For now, return empty list
-        return []
+        return []'''
     
     def compute_latent_behavior_loss(
         self,

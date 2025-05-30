@@ -69,8 +69,8 @@ class KarelWorld:
         self.state, self.metadata = self.state_generator.generate_state(task_specific=True)
         
         self.initial_state = self.state.copy()
-        print("initial state:")
-        print(self.initial_state[:,:,6])
+        #print("initial state:")
+        #print(self.initial_state[:,:,6])
         
         # Execution tracking
         self.step_count = 0
@@ -102,7 +102,7 @@ class KarelWorld:
             self.state = self.initial_state.copy()
         else:
             self._generate_random_state()
-        print("in reset:", self.state[:,:,6])    
+        #print("in reset:", self.state[:,:,6])    
         self.initial_state = self.state.copy()
         
         self.step_count = 0
@@ -143,8 +143,8 @@ class KarelWorld:
         self.step_count += 1
         
         # Execute action
-        print("before step:")
-        print("one marker:", self.state[:,:,6])
+        #print("before step:")
+        #print("one marker:", self.state[:,:,6])
         success = self._execute_action(Action(action))
         
         # Calculate reward
@@ -672,7 +672,7 @@ class KarelWorld:
     def _check_done(self) -> bool:
         """Check if the task is completed"""
         if self.task == 'harvester' or self.task == 'harvester_sparse':
-            print("one marker:", self.state[:,:,6])
+            #print("one marker:", self.state[:,:,6])
             return np.sum(self.state[:, :, 6:]) == 0
         elif self.task == 'cleanHouse' or self.task == 'cleanHouse_sparse':
             if 'marker_positions' not in self.metadata:

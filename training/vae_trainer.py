@@ -133,22 +133,25 @@ class HPRLVAETrainer:
         self.logger.info(f"Learning rate: {self.learning_rate}")
     
     def _create_beta_schedule(self) -> List[float]:
-        """FIXED: Create aggressive beta annealing to prevent collapse"""
+        """IMPROVED: More aggressive beta annealing for better generation without teacher forcing"""
         schedule = []
         for epoch in range(self.num_epochs):
-            if epoch < 100:
-                # Start with meaningful KL weight immediately (no warmup!)
-                beta = 0.001
-            elif epoch < 30:
-                # Quickly ramp to high beta
-                progress = (epoch - 10) / 20
-                beta = 0.1 + progress * 0.4  # 0.1 -> 0.5
-            elif epoch < 100:
-                # Maintain high KL weight
+            if epoch < 5:
+                # Start higher to prevent immediate collapse without teacher forcing
+                beta = 0.1
+            elif epoch < 20:
+                # Quick ramp to substantial KL weight
+                progress = (epoch - 5) / 15
+                beta = 0.1 + progress * 0.4  # 0.1 → 0.5
+            elif epoch < 80:
+                # Maintain strong KL weight for generation training
                 beta = 0.5
+            elif epoch < 150:
+                # Increase for better generation quality
+                beta = 0.6
             else:
-                # Even higher for final training
-                beta = min(1, self.base_beta)
+                # Maximum for final training
+                beta = min(0.8, self.base_beta)
             schedule.append(beta)
         return schedule
     
@@ -356,7 +359,7 @@ class HPRLVAETrainer:
         action_lengths: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
         """
-        FIXED forward pass with collapse monitoring
+        IMPROVED forward pass with dual training strategy - NO teacher forcing
         """
         # Get current coefficients from schedules
         current_beta = self.beta_schedule[min(self.current_epoch, len(self.beta_schedule)-1)]
@@ -365,55 +368,145 @@ class HPRLVAETrainer:
         # Use action loss only when lambda > 0
         use_action_loss = current_lambda > 0
         
-        # Forward pass through ProgramVAE
-        if use_action_loss:
-            results = self.program_vae(
-                programs=programs,
-                program_lengths=program_lengths,
-                states=states,
-                target_actions=target_actions,
-                target_programs=programs,
-                deterministic=False,
-                compute_policy=True
-            )
-        else:
-            results = self.program_vae(
-                programs=programs,
-                program_lengths=program_lengths,
-                states=None,
-                target_actions=None,
-                target_programs=programs,
-                deterministic=False,
-                compute_policy=False
-            )
+        # 1. RECONSTRUCTION TRAINING (encode real programs, decode without teacher forcing)
+        mu, logvar = self.program_vae.vae.encode(programs, program_lengths)
+        latent = self.program_vae.vae.reparameterize(mu, logvar)
         
-        # Compute losses with current coefficients
-        if use_action_loss:
-            losses = self.program_vae.loss(
-                programs=programs,
-                program_lengths=program_lengths,
-                target_programs=programs,
-                states=states,
-                target_actions=target_actions,
-                beta=current_beta,
-                action_weight=current_lambda
-            )
-        else:
-            losses = self.program_vae.loss(
-                programs=programs,
-                program_lengths=program_lengths,
-                target_programs=programs,
-                states=None,
-                target_actions=None,
-                beta=current_beta,
-                action_weight=0.0
-            )
+        # Decode WITHOUT teacher forcing - pure generation from latent
+        output_logits, output_log_probs = self.program_vae.vae.decode(
+            latent, 
+            target_programs=None,  # NO teacher forcing!
+            deterministic=False
+        )
         
-        # CRITICAL: Monitor for collapse and enforce minimum KL
+        # Compute reconstruction loss against original programs
+        recon_loss = self.compute_reconstruction_loss(output_logits, programs, program_lengths)
+        kl_loss = self.program_vae.vae.kl_loss(mu, logvar)
+        
+        total_loss = recon_loss + current_beta * kl_loss
+        
+        losses = {
+            'total_loss': total_loss,
+            'recon_loss': recon_loss,
+            'kl_loss': kl_loss,
+            'mu': mu,
+            'logvar': logvar
+        }
+        
+        # 2. PURE GENERATION TRAINING (random latents, no teacher forcing)
+        if self.global_step > self.generation_training_start and self.global_step % 3 == 0:
+            batch_size = programs.size(0)
+            
+            # Sample random latent vectors
+            random_latents = torch.randn(batch_size, self.latent_dim, device=self.device)
+            
+            # Pure generation
+            gen_logits, _ = self.program_vae.vae.decode(
+                random_latents, 
+                target_programs=None,  # NO teacher forcing!
+                deterministic=False
+            )
+            
+            # Simple coherence loss - encourage valid program structure
+            coherence_loss = self.compute_coherence_loss(gen_logits)
+            
+            losses['total_loss'] += 0.3 * coherence_loss
+            losses['generation_loss'] = coherence_loss
+        else:
+            losses['generation_loss'] = torch.tensor(0.0, device=self.device)
+        
+        # 3. ACTION PREDICTION (if enabled)
+        if use_action_loss and states is not None:
+            action_logits, action_log_probs = self.program_vae.condition_policy(
+                states, latent, target_actions, deterministic=False
+            )
+            
+            action_loss = self.compute_action_loss(action_logits, target_actions, action_lengths)
+            losses['total_loss'] += current_lambda * action_loss
+            losses['action_loss'] = action_loss
+        else:
+            losses['action_loss'] = torch.tensor(0.0, device=self.device)
+        
+        # Store training parameters
+        losses['current_beta'] = torch.tensor(current_beta)
+        losses['current_lambda'] = torch.tensor(current_lambda)
+        
+        # Monitor for collapse
         self._monitor_and_enforce_kl(losses, current_beta, current_lambda)
         
         return losses
-    
+
+    def compute_reconstruction_loss(self, output_logits: torch.Tensor, target_programs: torch.Tensor, program_lengths: torch.Tensor) -> torch.Tensor:
+        """Compute reconstruction loss without teacher forcing"""
+        batch_size, seq_len, vocab_size = output_logits.shape
+        target_seq_len = target_programs.size(1)
+        
+        # Match sequence lengths
+        min_len = min(seq_len, target_seq_len)
+        output_logits_matched = output_logits[:, :min_len, :]
+        target_programs_matched = target_programs[:, :min_len]
+        
+        # Create mask for valid positions
+        mask = torch.arange(min_len, device=program_lengths.device).unsqueeze(0) < program_lengths.unsqueeze(1)
+        
+        # Compute loss only on valid positions
+        valid_positions = mask.flatten()
+        if valid_positions.sum() > 0:
+            valid_logits = output_logits_matched.reshape(-1, vocab_size)[valid_positions]
+            valid_targets = target_programs_matched.flatten()[valid_positions]
+            return F.cross_entropy(valid_logits, valid_targets, reduction='mean')
+        else:
+            return torch.tensor(0.0, device=output_logits.device, requires_grad=True)
+
+    def compute_coherence_loss(self, gen_logits: torch.Tensor) -> torch.Tensor:
+        """Compute coherence loss for pure generation to encourage valid program structure"""
+        batch_size, seq_len, vocab_size = gen_logits.shape
+        
+        # Convert logits to tokens
+        generated_tokens = torch.argmax(gen_logits, dim=-1)
+        
+        # Simple coherence targets - encourage SOS at start, reasonable structure
+        coherence_targets = torch.zeros_like(generated_tokens)
+        
+        # First token should be SOS (token 0)
+        coherence_targets[:, 0] = 0
+        
+        # Encourage early EOS for simple programs (token 1)
+        if seq_len > 1:
+            coherence_targets[:, 1] = 1
+        
+        # Rest should be padding (self.padding_idx)
+        if seq_len > 2:
+            coherence_targets[:, 2:] = self.padding_idx
+        
+        # Compute coherence loss
+        coherence_loss = F.cross_entropy(
+            gen_logits.reshape(-1, vocab_size),
+            coherence_targets.reshape(-1),
+            ignore_index=self.padding_idx,
+            reduction='mean'
+        )
+        
+        return coherence_loss
+
+    def compute_action_loss(self, action_logits: torch.Tensor, target_actions: torch.Tensor, action_lengths: torch.Tensor) -> torch.Tensor:
+        """Compute action prediction loss"""
+        # Transpose action_logits to get [batch_size, num_demos, seq_len-1, num_actions]
+        action_logits_transposed = action_logits.transpose(-2, -1)
+        
+        # Match sequence lengths
+        actual_seq_len = action_logits_transposed.size(2)
+        target_seq_len = target_actions.size(2)
+        min_len = min(actual_seq_len, target_seq_len)
+        
+        action_logits_matched = action_logits_transposed[:, :, :min_len, :]
+        target_actions_matched = target_actions[:, :, :min_len]
+        
+        # Flatten for cross entropy
+        action_logits_flat = action_logits_matched.reshape(-1, action_logits_matched.size(-1))
+        target_actions_flat = target_actions_matched.reshape(-1)
+        
+        return F.cross_entropy(action_logits_flat, target_actions_flat, reduction='mean')
     def _monitor_and_enforce_kl(self, losses: Dict[str, torch.Tensor], beta: float, lambda_val: float):
         """CRITICAL: Monitor and enforce minimum KL loss to prevent collapse"""
         recon_loss = losses['recon_loss'].item()

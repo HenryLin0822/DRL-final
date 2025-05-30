@@ -14,6 +14,7 @@ import numpy as np
 import time
 import os
 import sys
+import traceback
 from typing import List, Union, Optional, Tuple, Dict, Any
 
 # Add project root to path
@@ -186,11 +187,7 @@ class KarelRenderer:
     def execute_program(self, program: Union[str, List[int], List[str]], 
                        step_delay: float = 1.0, auto_advance: bool = False) -> bool:
         """Execute a Karel program with step-by-step rendering"""
-        try:
-            token_indices = self.parse_program(program)
-        except Exception as e:
-            print(f"{self.colors.get('red', '')}✗ Error parsing program: {e}{self.colors.get('reset', '')}")
-            return False
+        token_indices = self.parse_program(program)
 
         if not token_indices:
             print(f"{self.colors.get('red', '')}✗ No valid tokens found in program{self.colors.get('reset', '')}")
@@ -219,29 +216,64 @@ class KarelRenderer:
         else:
             time.sleep(step_delay)
 
-        try:
-            import torch
-            result = self.program_executor.execute_with_dsl(
-                torch.tensor(token_indices),
-                self.karel_world,
-                return_traces=True
-            )
+        import torch
+        result = self.program_executor.execute_with_dsl(
+            torch.tensor(token_indices),
+            self.karel_world,
+            return_traces=True
+        )
+        
+        print(f"\nDSL Execution Result Details:")
+        print(f"  Result type: {type(result)}")
+        print(f"  Result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+        print(f"  Raw result: {result}")
+        
+        # Let's inspect every key-value pair in detail
+        if isinstance(result, dict):
+            print(f"\nDetailed result inspection:")
+            for key, value in result.items():
+                print(f"  {key}: {value} (type: {type(value)})")
+        
+        print(f"\nSuccess check:")
+        print(f"  Is dict: {isinstance(result, dict)}")
+        print(f"  Has 'success' key: {'success' in result if isinstance(result, dict) else 'N/A'}")
+        print(f"  Success value: {result.get('success') if isinstance(result, dict) else 'N/A'}")
+        print(f"  Success type: {type(result.get('success')) if isinstance(result, dict) else 'N/A'}")
+        
+        if isinstance(result, dict) and result.get('success', False):
+            print(f"{self.colors.get('green', '')}✓ DSL execution successful{self.colors.get('reset', '')}")
+            self.render_state(action_info=f"DSL Complete - Reward: {result.get('total_reward', 0):.3f}")
             
-            if result['success']:
-                print(f"{self.colors.get('green', '')}✓ DSL execution successful{self.colors.get('reset', '')}")
-                self.render_state(action_info=f"DSL Complete - Reward: {result['total_reward']:.3f}")
-                
-                print(f"\nDSL Execution Summary:")
-                print(f"  Actions executed: {result['action_length']}")
-                print(f"  Total reward: {result['total_reward']:.3f}")
-                print(f"  Success: {result['success']}")
-                return True
+            print(f"\nDSL Execution Summary:")
+            print(f"  Actions executed: {result.get('action_length', 'Unknown')}")
+            print(f"  Total reward: {result.get('total_reward', 0):.3f}")
+            print(f"  Success: {result.get('success', False)}")
+            
+            # Print traces if available
+            if 'traces' in result and result['traces']:
+                print(f"  Execution traces: {result['traces']}")
+            
+            return True
+        else:
+            error_msg = "Unknown error"
+            if isinstance(result, dict):
+                error_msg = result.get('error', result.get('message', str(result)))
             else:
-                print(f"{self.colors.get('red', '')}✗ DSL execution failed: {result.get('error', 'Unknown error')}{self.colors.get('reset', '')}")
-                return False
-                
-        except Exception as e:
-            print(f"{self.colors.get('red', '')}✗ DSL execution error: {e}{self.colors.get('reset', '')}")
+                error_msg = str(result)
+            
+            print(f"{self.colors.get('red', '')}✗ DSL execution failed: {error_msg}{self.colors.get('reset', '')}")
+            
+            # Print additional debug info
+            if isinstance(result, dict):
+                print(f"\nDetailed error information:")
+                for key, value in result.items():
+                    if key not in ['success', 'error', 'message']:
+                        print(f"  {key}: {value}")
+            
+            # Print current world state for debugging
+            print(f"\nFinal world state:")
+            self.render_state(action_info="Failed execution state")
+            
             return False
 
 
@@ -280,31 +312,29 @@ def test_validation():
         total += 1
         print(f"\nTest: {desc}")
         print(f"Program: {program}")
-        try:
-            success = renderer.execute_program(program, step_delay=0.1, auto_advance=True)
-            if success:
-                print("✅ PASSED")
-                passed += 1
-            else:
-                print("❌ FAILED (should have passed)")
-        except Exception as e:
-            print(f"❌ ERROR: {e}")
+        success = renderer.execute_program(program, step_delay=0.1, auto_advance=True)
+        if success:
+            print("✅ PASSED")
+            passed += 1
+        else:
+            print("❌ FAILED (should have passed)")
     
     print("\n❌ Testing INVALID programs (should fail):")
     for program, desc in invalid_programs:
         total += 1
         print(f"\nTest: {desc}")
         print(f"Program: {program}")
-        try:
-            success = renderer.execute_program(program, step_delay=0.1, auto_advance=True)
-            if not success:
-                print("✅ CORRECTLY REJECTED")
-                passed += 1
-            else:
-                print("❌ FAILED (should have been rejected)")
-        except Exception as e:
-            print("✅ CORRECTLY THREW ERROR")
+        # For invalid programs, we expect them to either return False or raise an exception
+        success = False
+        error_occurred = False
+        
+        success = renderer.execute_program(program, step_delay=0.1, auto_advance=True)
+        
+        if not success:
+            print("✅ CORRECTLY REJECTED")
             passed += 1
+        else:
+            print("❌ FAILED (should have been rejected)")
     
     print(f"\n{'='*60}")
     print(f"TEST SUMMARY: {passed}/{total} tests passed")
