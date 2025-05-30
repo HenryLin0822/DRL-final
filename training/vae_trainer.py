@@ -131,7 +131,9 @@ class HPRLVAETrainer:
         self.logger.info(f"Beta schedule: start={self.beta_schedule[0]:.4f}, end={self.beta_schedule[-1]:.4f}")
         self.logger.info(f"Target KL loss: > {self.target_kl_loss}")
         self.logger.info(f"Learning rate: {self.learning_rate}")
-    
+        self.generation_training_start = 3000  # When to start generation training
+        self.generation_training_frequency = 3  # Train generation every N batches  
+        self.generation_weight = 0.3  # Weight for pure generation loss
     def _create_beta_schedule(self) -> List[float]:
         """IMPROVED: More aggressive beta annealing for better generation without teacher forcing"""
         schedule = []
@@ -507,6 +509,7 @@ class HPRLVAETrainer:
         target_actions_flat = target_actions_matched.reshape(-1)
         
         return F.cross_entropy(action_logits_flat, target_actions_flat, reduction='mean')
+    
     def _monitor_and_enforce_kl(self, losses: Dict[str, torch.Tensor], beta: float, lambda_val: float):
         """CRITICAL: Monitor and enforce minimum KL loss to prevent collapse"""
         recon_loss = losses['recon_loss'].item()
