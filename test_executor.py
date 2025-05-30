@@ -40,10 +40,10 @@ class KarelRenderer:
         self.grid_size = grid_size
         
         # Initialize Karel world
-        self.karel_world = KarelWorld(task=task, grid_size=grid_size, timeout_steps=100)
+        self.karel_world = KarelWorld(task=task, grid_size=grid_size, timeout_steps=1000)
         
         # Initialize program executor for token handling
-        self.program_executor = ProgramExecutor(device='cpu')
+        self.program_executor = ProgramExecutor(device='cpu', max_execution_steps=1000)
         
         # Initialize tokens
         self.tokens = karel_tokens
@@ -64,6 +64,18 @@ class KarelRenderer:
             'yellow': '\033[93m', 'blue': '\033[94m', 'cyan': '\033[96m',
             'white': '\033[97m', 'gray': '\033[90m', 'bold': '\033[1m'
         }
+    
+    def _get_state_array(self):
+        """Helper method to extract the numpy array from the state tuple"""
+        if isinstance(self.karel_world.state, tuple):
+            # Try to find the numpy array in the tuple
+            for item in self.karel_world.state:
+                if isinstance(item, np.ndarray) and len(item.shape) == 3:
+                    return item
+            # If not found, try the first item
+            return self.karel_world.state[0]
+        else:
+            return self.karel_world.state
     
     def parse_program(self, program_input: Union[str, List[int], List[str]]) -> List[int]:
         """Parse program input into token indices"""
@@ -97,7 +109,14 @@ class KarelRenderer:
     def create_task_specific_world(self):
         """Create task-specific initial world state"""
         self.karel_world.reset()
-        state = self.karel_world.state
+        
+        # Get the actual state array
+        state = self._get_state_array()
+        
+        # Debug: Check what we actually got
+        print(f"DEBUG: State type: {type(state)}")
+        if hasattr(state, 'shape'):
+            print(f"DEBUG: State shape: {state.shape}")
         
         if self.task == 'harvester':
             # Place markers in a pattern for harvesting
@@ -125,7 +144,8 @@ class KarelRenderer:
             print(f"Action: {action_info}")
         print(f"{'='*60}")
         
-        state = self.karel_world.state
+        # Get the actual state array
+        state = self._get_state_array()
         h, w = self.grid_size
         
         for row in range(h):

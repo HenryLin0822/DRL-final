@@ -103,8 +103,8 @@ class KarelEnvironment(gym.Env):
         """Generate fixed states for consistent training"""
         self.fixed_states = []
         for i in range(self.max_episode_steps + 1):
-            state, metadata = self.state_generator.generate_state(task_specific=True)
-            self.fixed_states.append((state, metadata))
+            state = self.state_generator.generate_state(task_specific=True)
+            self.fixed_states.append(state)
     
     def reset(
         self, 

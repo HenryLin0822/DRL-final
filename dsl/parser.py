@@ -44,7 +44,7 @@ class KarelParser:
     
     def __init__(self):
         self.tokens = karel_tokens
-        self.max_execution_steps = 200
+        self.max_execution_steps = 1000
         self.call_stack_limit = 50
     
     def parse_string(self, program_string: str) -> KarelProgram:
@@ -367,7 +367,7 @@ class KarelExecutor:
     """
     
     def __init__(self):
-        self.max_steps = 200
+        self.max_steps = 1000
         self.step_count = 0
         self.call_depth = 0
         self.max_call_depth = 50

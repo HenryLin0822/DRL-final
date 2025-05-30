@@ -10,8 +10,10 @@ from typing import Tuple, Dict, List, Optional, Any
 from enum import IntEnum
 from collections import deque
 import copy
-
-
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from environments.state_generator import KarelStateGenerator
 class Direction(IntEnum):
     """Karel's facing directions"""
     NORTH = 0
@@ -44,7 +46,7 @@ class KarelWorld:
     def __init__(
         self, 
         task: str = 'harvester',
-        grid_size: Tuple[int, int] = (8, 8),
+        grid_size = (8, 8),
         timeout_steps: int = 100,
         reward_diff: bool = False,
         final_reward_scale: bool = True
@@ -54,7 +56,7 @@ class KarelWorld:
         self.timeout_steps = timeout_steps
         self.reward_diff = reward_diff
         self.final_reward_scale = final_reward_scale
-        
+        self.state_generator = KarelStateGenerator(task=self.task, grid_size = (8,8))
         # Maximum markers per cell based on task
         if task in ['topOff', 'topOff_sparse', 'randomMaze_key2door', 'randomMaze_key2door_sparse', 
                    'randomMaze_key2doorSpace', 'randomMaze_key2doorSpace_sparse', 
@@ -64,9 +66,11 @@ class KarelWorld:
             self.max_markers = 1
         
         # State representation
-        self.state = np.zeros((self.h, self.w, 8), dtype=bool)
-        self.initial_state = None
-        self.metadata = {}
+        self.state, self.metadata = self.state_generator.generate_state(task_specific=True)
+        
+        self.initial_state = self.state.copy()
+        print("initial state:")
+        print(self.initial_state[:,:,6])
         
         # Execution tracking
         self.step_count = 0
@@ -94,13 +98,12 @@ class KarelWorld:
         
     def reset(self, initial_state: Optional[np.ndarray] = None, metadata: Optional[Dict] = None) -> np.ndarray:
         """Reset the Karel world to initial state"""
-        if initial_state is not None:
-            self.state = initial_state.copy()
+        if self.initial_state is not None:
+            self.state = self.initial_state.copy()
         else:
             self._generate_random_state()
-            
+        print("in reset:", self.state[:,:,6])    
         self.initial_state = self.state.copy()
-        self.metadata = metadata or {}
         
         self.step_count = 0
         self.total_reward = 0.0
@@ -140,6 +143,8 @@ class KarelWorld:
         self.step_count += 1
         
         # Execute action
+        print("before step:")
+        print("one marker:", self.state[:,:,6])
         success = self._execute_action(Action(action))
         
         # Calculate reward
@@ -330,7 +335,7 @@ class KarelWorld:
         agent_pos = self._get_agent_position()
         if agent_pos is None:
             return 0.0
-            
+        #print("get reward")    
         if self.task == 'harvester' or self.task == 'harvester_sparse':
             return self._harvester_reward(agent_pos)
         elif self.task == 'cleanHouse' or self.task == 'cleanHouse_sparse':
@@ -376,23 +381,26 @@ class KarelWorld:
         return reward
     
     def _clean_house_reward(self, agent_pos) -> float:
-        """Reward for cleanHouse task: clean specific marked positions"""
+        """Reward for cleanHouse task: clean positions that had markers initially"""
         if self.done:
             return 0.0
-            
-        if 'marker_positions' not in self.metadata:
+        
+        # Compare current state with initial state to find which positions had markers
+        initial_markers = self.initial_state[:, :, 6] | self.initial_state[:, :, 7]
+        current_markers = self.state[:, :, 6] | self.state[:, :, 7]
+        
+        # Count positions that had markers initially but are now empty
+        cleaned_positions = initial_markers & (~current_markers)
+        total_initial_markers = np.sum(initial_markers)
+        
+        if total_initial_markers == 0:
             return 0.0
             
-        pick_marker = 0
-        for mpos in self.metadata['marker_positions']:
-            if self.state[mpos[0], mpos[1], 5] and not self.state[mpos[0], mpos[1], 6]:
-                pick_marker += 1
-                
-        current_progress_ratio = pick_marker / float(len(self.metadata['marker_positions']))
+        current_progress_ratio = np.sum(cleaned_positions) / float(total_initial_markers)
         reward = current_progress_ratio - self.progress_ratio
         self.progress_ratio = current_progress_ratio
         
-        done = pick_marker == len(self.metadata['marker_positions'])
+        done = np.sum(cleaned_positions) == total_initial_markers
         reward = reward if self.task == 'cleanHouse' else float(done)
         self.done = self.done or done
         return reward
@@ -664,6 +672,7 @@ class KarelWorld:
     def _check_done(self) -> bool:
         """Check if the task is completed"""
         if self.task == 'harvester' or self.task == 'harvester_sparse':
+            print("one marker:", self.state[:,:,6])
             return np.sum(self.state[:, :, 6:]) == 0
         elif self.task == 'cleanHouse' or self.task == 'cleanHouse_sparse':
             if 'marker_positions' not in self.metadata:
@@ -939,4 +948,3 @@ if __name__ == "__main__":
             break
     
     print(f"Total reward: {world.total_reward:.3f}")
-    print(f"Steps taken: {world.step_count}")

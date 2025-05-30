@@ -3,10 +3,16 @@ Karel State Generator
 
 This module generates initial states for various Karel tasks.
 """
-
+from enum import IntEnum
 import numpy as np
 from typing import Tuple, Dict, List, Optional, Any
-from .karel_world import Direction
+
+class Direction(IntEnum):
+    """Karel's facing directions"""
+    NORTH = 0
+    EAST = 1
+    SOUTH = 2
+    WEST = 3
 
 
 class KarelStateGenerator:
@@ -16,15 +22,17 @@ class KarelStateGenerator:
     
     def __init__(
         self,
-        grid_size: Tuple[int, int] = (8, 8),
+        grid_size = (8, 8),
         task: str = 'harvester',
         seed: Optional[int] = None
     ):
         self.h, self.w = grid_size
         self.task = task
         self.rng = np.random.RandomState(seed)
+        # Store metadata separately to avoid returning tuples
+        self.last_metadata = {}
     
-    def generate_state(self, task_specific: bool = True) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def generate_state(self, task_specific: bool = True) -> np.ndarray:
         """
         Generate an initial state for the specified task
         
@@ -32,8 +40,9 @@ class KarelStateGenerator:
             task_specific: Whether to generate task-specific states
             
         Returns:
-            state: Initial Karel state
-            metadata: Task-specific metadata
+            state: Initial Karel state as numpy array
+            
+        Note: Metadata is stored in self.last_metadata
         """
         if task_specific:
             if self.task == 'harvester':
@@ -53,7 +62,11 @@ class KarelStateGenerator:
         else:
             return self._generate_random_state()
     
-    def _generate_random_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def get_last_metadata(self) -> Dict[str, Any]:
+        """Get metadata from the last state generation"""
+        return self.last_metadata
+    
+    def _generate_random_state(self) -> np.ndarray:
         """Generate a random Karel state"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -75,9 +88,10 @@ class KarelStateGenerator:
                 if not state[r, c, :4].any():  # Not agent position
                     state[r, c, 5] = True  # No markers
         
-        return state, {}
+        self.last_metadata = {}
+        return state, self.last_metadata
     
-    def _generate_harvester_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _generate_harvester_state(self) -> np.ndarray:
         """Generate initial state for harvester task"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -101,9 +115,10 @@ class KarelStateGenerator:
                 else:
                     state[r, c, 5] = True  # No markers at agent position
         
-        return state, {'total_markers': (self.h - 2) * (self.w - 2) - 1}
+        self.last_metadata = {'total_markers': (self.h - 2) * (self.w - 2) - 1}
+        return state, self.last_metadata
     
-    def _generate_clean_house_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _generate_clean_house_state(self) -> np.ndarray:
         """Generate initial state for cleanHouse task"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -146,9 +161,10 @@ class KarelStateGenerator:
                 else:
                     state[r, c, 5] = True  # No markers at agent position
         
-        return state, {'marker_positions': marker_positions}
+        self.last_metadata = {'marker_positions': marker_positions}
+        return state, self.last_metadata
     
-    def _generate_four_corners_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _generate_four_corners_state(self) -> np.ndarray:
         """Generate initial state for fourCorners task"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -178,9 +194,10 @@ class KarelStateGenerator:
         # Agent position should also have no markers
         state[agent_row, agent_col, 5] = True
         
-        return state, {'corners': [(1, 1), (1, self.w-2), (self.h-2, 1), (self.h-2, self.w-2)]}
+        self.last_metadata = {'corners': [(1, 1), (1, self.w-2), (self.h-2, 1), (self.h-2, self.w-2)]}
+        return state, self.last_metadata
     
-    def _generate_stair_climber_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _generate_stair_climber_state(self) -> np.ndarray:
         """Generate initial state for stairClimber task"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -232,12 +249,13 @@ class KarelStateGenerator:
                 if not state[r, c, 4]:  # Not a wall
                     valid_positions.append((r, c))
         
-        return state, {
+        self.last_metadata = {
             'marker_positions': [(marker_row, marker_col)],
             'agent_valid_positions': valid_positions
         }
+        return state, self.last_metadata
     
-    def _generate_top_off_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _generate_top_off_state(self) -> np.ndarray:
         """Generate initial state for topOff task"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -272,12 +290,13 @@ class KarelStateGenerator:
                 else:
                     state[r, c, 5] = True  # No markers
         
-        return state, {
+        self.last_metadata = {
             'expected_marker_positions': expected_positions,
             'not_expected_marker_positions': not_expected_positions
         }
+        return state, self.last_metadata
     
-    def _generate_random_maze_state(self) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _generate_random_maze_state(self) -> np.ndarray:
         """Generate initial state for randomMaze task"""
         state = np.zeros((self.h, self.w, 8), dtype=bool)
         
@@ -323,7 +342,8 @@ class KarelStateGenerator:
         # Agent position
         state[agent_row, agent_col, 5] = True
         
-        return state, {'marker_positions': [(marker_row, marker_col)]}
+        self.last_metadata = {'marker_positions': [(marker_row, marker_col)]}
+        return state, self.last_metadata
     
     def generate_program_instruction_state(
         self, 
@@ -367,4 +387,11 @@ class KarelStateGenerator:
         # Agent position has no markers
         state[agent_row, agent_col, 5] = True
         
-        return state
+        # Store metadata for this function too
+        self.last_metadata = {
+            'agent_position': (agent_row, agent_col, agent_dir),
+            'wall_probability': wall_prob,
+            'idx': idx
+        }
+        
+        return state, self.last_metadata

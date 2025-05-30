@@ -367,12 +367,15 @@ class ProgramExecutor(nn.Module):
                 }
             
             # Reset karel world
+            print("karel world state before reset:", karel_world.state[:,:,6])
             karel_world.reset()
             print(f"DEBUG: Karel world reset, initial step count: {karel_world.step_count}")
             
             # Execute using DSL parser - this returns execution trace
             print(f"DEBUG: About to execute program with DSL...")
             try:
+                print("program string:", program_string)
+                print("karel world state before execute:", karel_world.state[:,:,6])
                 execution_trace = self.dsl.execute(program_string, karel_world)
                 print(f"DEBUG: Execution complete")
                 print(f"DEBUG: Execution trace type: {type(execution_trace)}")
@@ -415,7 +418,10 @@ class ProgramExecutor(nn.Module):
                 }
             
             # Calculate results
+            #print(hasattr(karel_world, 'total_reward'))
             total_reward = karel_world.total_reward if hasattr(karel_world, 'total_reward') else 0.0
+            #print("total_reward:", total_reward)
+            #total_reward = karel_world._calculate_reward()
             success = karel_world.done if hasattr(karel_world, 'done') else False
             step_count = karel_world.step_count if hasattr(karel_world, 'step_count') else 0
             
