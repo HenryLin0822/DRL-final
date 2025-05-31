@@ -4,8 +4,10 @@
 # Optimized parameters for better generation capability
 
 python3 train_vae.py \
-    --epochs 200 \
+    --epochs 350 \
     --batch-size 64 \
-    --lr 1e-5 \
-    --beta 0.5 \
-    --lambda-behavior 0.0
+    --lr 2e-4 \
+    --lambda-behavior 0.0 \
+    --save-freq 10 \
+    --resume checkpoints/latest_model.pt \
+    --checkpoint-dir checkpoints/vae3

@@ -765,6 +765,7 @@ def main():
             'training': {
                 'max_episodes': 200,
                 'eval_frequency': 20,
+                'save_frequency': 500,
                 'log_frequency': 5,
                 'warmup_episodes': 10,
             },
