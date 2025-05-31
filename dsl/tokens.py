@@ -135,16 +135,47 @@ class KarelTokens:
         return indices
     
     def indices_to_tokens(self, indices: List[int]) -> List[str]:
-        return [self.idx_to_token.get(idx, '<PAD>') for idx in indices]
+        """Convert indices to tokens with debugging"""
+        print("🔍 DEBUG INDICES_TO_TOKENS:")
+        result_tokens = []
+        
+        for i, idx in enumerate(indices[:15]):  # Only debug first 15
+            if idx in self.idx_to_token:
+                token = self.idx_to_token[idx]
+                result_tokens.append(token)
+                #print(f"   [{i}]: {idx} -> '{token}' ✓")
+            else:
+                result_tokens.append('<PAD>')
+                #print(f"   [{i}]: {idx} -> '<PAD>' (not found)")
+        
+        # Continue for rest of indices without debug
+        for idx in indices[15:]:
+            result_tokens.append(self.idx_to_token.get(idx, '<PAD>'))
+        
+        return result_tokens
     
     def string_to_indices(self, program_string: str) -> List[int]:
         tokens = self.string_to_tokens(program_string)
         return self.tokens_to_indices(tokens)
     
     def indices_to_string(self, indices: List[int]) -> str:
+        """Convert indices to program string with debugging"""
+        #print("🔍 DEBUG TOKENS CONVERSION:")
+        #print(f"   Input indices: {indices[:15]}")
+        
+        # Convert indices to tokens
         tokens = self.indices_to_tokens(indices)
-        tokens = [token for token in tokens if token != '<PAD>']
-        return self.tokens_to_string(tokens)
+        #print(f"   Converted to tokens: {tokens[:15]}")
+        
+        # Filter padding
+        filtered_tokens = [token for token in tokens if token != '<PAD>']
+        #print(f"   After padding filter: {filtered_tokens[:15]}")
+        
+        # Join to string
+        result_string = self.tokens_to_string(filtered_tokens)
+        #print(f"   Final string: '{result_string}'")
+        
+        return result_string
     
     def get_padding_index(self) -> int:
         return self.token_to_idx['<PAD>']

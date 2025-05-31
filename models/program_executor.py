@@ -274,162 +274,160 @@ class ProgramExecutor(nn.Module):
         
         return actions, total_reward, success, states
     
+    def truncate_at_program_end(self, indices: List[int]) -> List[int]:
+        """
+        Truncate program at the first valid DEF run m(...) m) structure
+        
+        Args:
+            indices: List of token indices
+            
+        Returns:
+            Truncated indices ending at the first m)
+        """
+        print("🔍 DEBUG PROGRAM TRUNCATION:")
+        print(f"   Input indices: {indices}")
+        
+        # Must start with DEF run m(
+        if len(indices) < 4 or indices[0] != 0 or indices[1] != 1 or indices[2] != 2:
+            print("   ❌ Doesn't start with DEF run m(")
+            return indices
+        
+        # Find the first m) after the initial m(
+        for i in range(3, len(indices)):  # Start after m(
+            if indices[i] == 3:  # Found m)
+                truncated = indices[:i+1]  # Include the m)
+                print(f"   ✅ Found first m) at position {i}")
+                print(f"   Truncated to: {truncated}")
+                return truncated
+        
+        print("   ❌ No m) found, returning original")
+        return indices
+
+    # MODIFY execute_with_dsl method - ADD this after padding filter:
+
     def execute_with_dsl(
         self,
         program_tokens: torch.Tensor,
-        karel_world,  # KarelWorld object directly (not KarelEnvironment)
+        karel_world,
         return_traces: bool = True
     ) -> Dict[str, Any]:
-        """
-        Execute program using full DSL parsing (for advanced programs)
+        """Execute program using full DSL parsing"""
         
-        Args:
-            program_tokens: [seq_len] - tokenized program
-            karel_world: KarelWorld instance (from renderer)
-            return_traces: Whether to return execution traces
-            
-        Returns:
-            Dictionary with execution results
-        """
         # Convert tokens to indices
         if isinstance(program_tokens, torch.Tensor):
             indices = program_tokens.cpu().numpy().tolist()
         else:
             indices = program_tokens
         
+        print("🔍 DEBUG EXECUTOR INPUT:")
+        print(f"   Raw indices received: {indices[:20]}...")  # Show first 20
+        
         # Filter padding
         valid_indices = [i for i in indices if i != self.padding_idx and i < self.vocab_size]
+        print(f"   After padding filter: {valid_indices[:20]}...")
         
-        if not valid_indices:
+        # 🆕 NEW: Truncate at first valid program end
+        truncated_indices = self.truncate_at_program_end(valid_indices)
+        print(f"   After truncation: {truncated_indices}")
+        
+        if not truncated_indices:
             return {
-                'states': [],
-                'actions': [],
-                'action_length': 0,
-                'total_reward': self.timeout_penalty,
-                'success': False,
-                'error': 'Empty program'
+                'states': [], 'actions': [], 'action_length': 0,
+                'total_reward': self.timeout_penalty, 'success': False,
+                'error': 'Empty program after truncation'
             }
+        
+        # Use truncated indices for the rest of the processing
+        valid_indices = truncated_indices
         
         # Convert indices to token names for validation
         token_names = []
-        for idx in valid_indices:
+        print("🔍 DEBUG TOKEN NAME CONVERSION:")
+        for i, idx in enumerate(valid_indices):
             if hasattr(self.tokens, 'idx_to_token') and idx in self.tokens.idx_to_token:
-                token_names.append(self.tokens.idx_to_token[idx])
+                token = self.tokens.idx_to_token[idx]
+                token_names.append(token)
+                print(f"   [{i}]: {idx} -> '{token}'")
             else:
                 token_names.append(f'UNK_{idx}')
+                print(f"   [{i}]: {idx} -> 'UNK_{idx}' (not found)")
+
+        print(f"   Final token_names: {token_names}")
+        print(f"   Final valid_indices: {valid_indices}")
+
+        # Verify they match
+        if len(token_names) == len(valid_indices):
+            print("   ✅ Arrays same length")
+            last_idx = valid_indices[-1]
+            last_name = token_names[-1]
+            expected_name = self.tokens.idx_to_token.get(last_idx, f'UNK_{last_idx}')
+            print(f"   Last check: idx={last_idx}, name='{last_name}', expected='{expected_name}'")
+            
+            if last_name != expected_name:
+                print(f"   ❌ MISMATCH DETECTED!")
+                return {
+                    'states': [], 'actions': [], 'action_length': 0,
+                    'total_reward': self.timeout_penalty, 'success': False,
+                    'error': f'Token name mismatch: {last_name} != {expected_name}'
+                }
+        else:
+            print(f"   ❌ LENGTH MISMATCH!")
+            return {
+                'states': [], 'actions': [], 'action_length': 0,
+                'total_reward': self.timeout_penalty, 'success': False,
+                'error': f'Length mismatch: indices={len(valid_indices)}, names={len(token_names)}'
+            }
         
+        # Rest of the method continues as before...
         # Validate DSL format
         try:
             validation_result = self._validate_dsl_format(valid_indices, token_names)
+            print(f"   DSL validation result: {validation_result}")
             if not validation_result['valid']:
                 return {
-                    'states': [],
-                    'actions': [],
-                    'action_length': 0,
-                    'total_reward': self.timeout_penalty,
-                    'success': False,
+                    'states': [], 'actions': [], 'action_length': 0,
+                    'total_reward': self.timeout_penalty, 'success': False,
                     'error': f'Invalid DSL format: {validation_result["error"]}'
                 }
         except Exception as e:
+            print(f"   DSL validation ERROR: {e}")
             return {
-                'states': [],
-                'actions': [],
-                'action_length': 0,
-                'total_reward': self.timeout_penalty,
-                'success': False,
+                'states': [], 'actions': [], 'action_length': 0,
+                'total_reward': self.timeout_penalty, 'success': False,
                 'error': f'Validation error: {str(e)}'
             }
         
         try:
             # Convert indices to program string using tokens
             program_string = self.tokens.indices_to_string(valid_indices)
-            #print(f"DEBUG: Program string: {program_string}")
-            
-            # First, let's see if the program parses correctly
-            parsed_program = self.dsl.parse(program_string)
-            #print(f"DEBUG: Parsed program valid: {parsed_program.is_valid}")
-            #print(f"DEBUG: Parsed program error: {parsed_program.error_message}")
-            #print(f"DEBUG: Parsed statements: {len(parsed_program.statements) if parsed_program.is_valid else 0}")
-            if parsed_program.is_valid:
-                print(f"DEBUG: Statement types: {[stmt.get('type', 'unknown') for stmt in parsed_program.statements]}")
+            print(f"   Program string from tokens: '{program_string}'")
             
             # Validate program using DSL parser
             valid, error_msg = self.dsl.validate_program(program_string)
-            #print(f"DEBUG: Program validation: {valid}, error: {error_msg}")
+            print(f"   Program validation: {valid}, error: {error_msg}")
             if not valid:
                 return {
-                    'states': [],
-                    'actions': [],
-                    'action_length': 0,
-                    'total_reward': self.timeout_penalty,
-                    'success': False,
+                    'states': [], 'actions': [], 'action_length': 0,
+                    'total_reward': self.timeout_penalty, 'success': False,
                     'error': f'Invalid program: {error_msg}'
                 }
             
-            # Reset karel world
-            #print("karel world state before reset:", karel_world.state[:,:,6])
+            # Reset karel world and execute
             karel_world.reset()
-            #print(f"DEBUG: Karel world reset, initial step count: {karel_world.step_count}")
+            print(f"   About to execute program: '{program_string}'")
             
-            # Execute using DSL parser - this returns execution trace
-            #print(f"DEBUG: About to execute program with DSL...")
-            try:
-                #print("program string:", program_string)
-                #print("karel world state before execute:", karel_world.state[:,:,6])
-                execution_trace = self.dsl.execute(program_string, karel_world)
-                #print(f"DEBUG: Execution complete")
-                #print(f"DEBUG: Execution trace type: {type(execution_trace)}")
-                #print(f"DEBUG: Execution trace length: {len(execution_trace) if execution_trace else 'None'}")
-                #print(f"DEBUG: Karel world step count after: {karel_world.step_count}")
-                #print(f"DEBUG: Karel world done: {karel_world.done}")
-                
-            except (ParseError, ExecutionError) as e:
-                #print(f"DEBUG: DSL ParseError/ExecutionError: {e}")
-                return {
-                    'states': [],
-                    'actions': [],
-                    'action_length': 0,
-                    'total_reward': self.timeout_penalty,
-                    'success': False,
-                    'error': f'DSL execution error: {str(e)}'
-                }
-            except Exception as e:
-                #print(f"DEBUG: Other exception in DSL execute: {e}")
-                import traceback
-                traceback.print_exc()
-                return {
-                    'states': [],
-                    'actions': [],
-                    'action_length': 0,
-                    'total_reward': self.timeout_penalty,
-                    'success': False,
-                    'error': f'Execution error: {str(e)}'
-                }
-            
-            if execution_trace is None:
-                #print(f"DEBUG: DSL execution returned None - this should not happen")
-                return {
-                    'states': [],
-                    'actions': [],
-                    'action_length': 0,
-                    'total_reward': self.timeout_penalty,
-                    'success': False,
-                    'error': 'DSL execution returned None'
-                }
+            execution_trace = self.dsl.execute(program_string, karel_world)
             
             # Calculate results
-            #print(hasattr(karel_world, 'total_reward'))
             total_reward = karel_world.total_reward if hasattr(karel_world, 'total_reward') else 0.0
-            #print("total_reward:", total_reward)
-            #total_reward = karel_world._calculate_reward()
             success = karel_world.done if hasattr(karel_world, 'done') else False
             step_count = karel_world.step_count if hasattr(karel_world, 'step_count') else 0
             
-            print(f"DEBUG: Final results - reward: {total_reward}, success: {success}, steps: {step_count}")
+            print(f"   ✅ Execution successful - reward: {total_reward}, success: {success}, steps: {step_count}")
             
             return {
                 'states': execution_trace if return_traces else [],
-                'actions': [],  # DSL doesn't track individual actions easily
+                'actions': [],
                 'action_length': step_count,
                 'total_reward': total_reward,
                 'success': success,
@@ -437,18 +435,15 @@ class ProgramExecutor(nn.Module):
             }
             
         except Exception as e:
-            print(f"DEBUG: Outer exception: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"   ❌ Execution failed: {e}")
             return {
-                'states': [],
-                'actions': [],
-                'action_length': 0,
-                'total_reward': self.timeout_penalty,
-                'success': False,
+                'states': [], 'actions': [], 'action_length': 0,
+                'total_reward': self.timeout_penalty, 'success': False,
                 'error': f'Execution error: {str(e)}'
             }
     
+    # REPLACE _validate_dsl_format method in program_executor.py
+
     def _validate_dsl_format(self, token_indices: List[int], token_names: List[str]) -> Dict[str, Any]:
         """
         Strictly validate DSL format - must start with DEF run m(...) and have matched brackets
@@ -456,44 +451,74 @@ class ProgramExecutor(nn.Module):
         Returns:
             Dictionary with 'valid' boolean and 'error' message
         """
+        #print("🔍 DEBUG DSL VALIDATION:")
+        #print(f"   Token indices: {token_indices}")
+        #print(f"   Token names: {token_names}")
+        #print(f"   Length indices: {len(token_indices)}, Length names: {len(token_names)}")
+        
+        # CHECK: Arrays should be same length
+        if len(token_indices) != len(token_names):
+            error_msg = f'Array length mismatch: indices={len(token_indices)}, names={len(token_names)}'
+            #print(f"   FAIL: {error_msg}")
+            return {'valid': False, 'error': error_msg}
+        
         if len(token_indices) < 4:
-            return {
-                'valid': False,
-                'error': 'Program too short. Minimum format: DEF run m( <statement> m)'
-            }
+            error_msg = 'Program too short. Minimum format: DEF run m( <statement> m)'
+            #print(f"   FAIL: {error_msg}")
+            return {'valid': False, 'error': error_msg}
         
         # Must start with DEF run m(
-        if token_indices[0] != 0:  # DEF
-            return {
-                'valid': False,
-                'error': f'Program must start with DEF, found: {token_names[0]}'
-            }
+        start_checks = [
+            (0, 0, 'DEF'),
+            (1, 1, 'run'), 
+            (2, 2, 'm(')
+        ]
         
-        if token_indices[1] != 1:  # run
-            return {
-                'valid': False,
-                'error': f'Second token must be run, found: {token_names[1]}'
-            }
+        for pos, expected_idx, expected_name in start_checks:
+            actual_idx = token_indices[pos]
+            actual_name = token_names[pos]
+            #print(f"   Position {pos}: expected {expected_idx}('{expected_name}'), got {actual_idx}('{actual_name}')")
+            
+            if actual_idx != expected_idx:
+                error_msg = f'Position {pos} must be {expected_name}, found: {actual_name}'
+                #print(f"   FAIL: {error_msg}")
+                return {'valid': False, 'error': error_msg}
         
-        if token_indices[2] != 2:  # m(
-            return {
-                'valid': False,
-                'error': f'Third token must be m(, found: {token_names[2]}'
-            }
+        # Must end with m) - CHECK BOTH ARRAYS
+        last_idx = token_indices[-1]
+        last_name = token_names[-1]
+        #print(f"   Last token: indices[-1]={last_idx}, names[-1]='{last_name}'")
         
-        # Must end with m)
-        if token_indices[-1] != 3:  # m)
-            return {
-                'valid': False,
-                'error': f'Program must end with m), found: {token_names[-1]}'
-            }
+        # Double-check: what does this index actually map to?
+        expected_token = self.tokens.idx_to_token.get(last_idx, f'UNK_{last_idx}')
+        #print(f"   Index {last_idx} should map to: '{expected_token}'")
+        
+        if last_idx != 3:  # m)
+            error_msg = f'Program must end with m), found: {last_name} (index {last_idx})'
+            print(f"   FAIL: {error_msg}")
+            return {'valid': False, 'error': error_msg}
+        
+        # Additional check: verify the token name matches what we expect
+        if expected_token != 'm)':
+            error_msg = f'Index {last_idx} maps to "{expected_token}", not "m)" - token mapping issue!'
+            print(f"   FAIL: {error_msg}")
+            return {'valid': False, 'error': error_msg}
+        
+        if last_name != 'm)':
+            error_msg = f'Token name mismatch: index {last_idx} gives "{last_name}", expected "m)"'
+            print(f"   FAIL: {error_msg}")
+            return {'valid': False, 'error': error_msg}
         
         # Validate bracket matching
         bracket_result = self._validate_bracket_matching(token_names)
         if not bracket_result['valid']:
+            print(f"   FAIL: Bracket validation failed")
             return bracket_result
         
+        #print("   PASS: DSL format validation successful")
         return {'valid': True, 'error': ''}
+
+
     
     def _validate_bracket_matching(self, token_names: List[str]) -> Dict[str, Any]:
         """

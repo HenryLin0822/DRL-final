@@ -173,26 +173,15 @@ class DDPGTrainer:
         self.logger.info(f"Karel environment ready for task '{self.task}' and program executor initialized")
     
     def latent_to_program_tokens(self, latent_embedding: torch.Tensor) -> torch.Tensor:
-        """
-        Convert latent embedding to program tokens using VAE decoder
-        
-        Args:
-            latent_embedding: [batch_size, 64] or [64] - latent embedding
-            
-        Returns:
-            program_tokens: [batch_size, seq_len] or [seq_len] - program token indices
-        """
+        """Convert latent embedding to program tokens using VAE decoder"""
         with torch.no_grad():
             if latent_embedding.dim() == 1:
                 latent_embedding = latent_embedding.unsqueeze(0)
             
             # Apply VAE configuration settings
             vae_config = self.config['vae']
-            
-            # Scale latent embedding for VAE
             scaled_latent = latent_embedding * vae_config['latent_scaling']
             
-            # Clip if enabled
             if vae_config['use_latent_clipping']:
                 clip_range = vae_config['latent_clip_range']
                 scaled_latent = torch.clamp(scaled_latent, clip_range[0], clip_range[1])
@@ -207,11 +196,23 @@ class DDPGTrainer:
             # Get tokens via argmax
             program_tokens = torch.argmax(program_logits, dim=-1)
             
-            if self.config['debug']['log_program_samples'] and np.random.random() < 0.1:
-                # Occasionally log the decoded program for debugging
-                token_list = program_tokens[0].cpu().numpy().tolist()[:10]  # First 10 tokens
-                program_str = self.tokens.indices_to_string(token_list)
-                self.logger.debug(f"Decoded program sample: {program_str}")
+            # 🆕 NEW: Limit sequence length to reasonable program size
+            max_program_length = 50  # Reasonable limit
+            if program_tokens.size(1) > max_program_length:
+                program_tokens = program_tokens[:, :max_program_length]
+            
+            # Debug occasionally
+            if np.random.random() < 0.1:
+                token_indices = program_tokens[0].cpu().numpy().tolist()
+                print(f"🔍 VAE OUTPUT: {token_indices[:15]}...")
+                
+                # Look for first m) to see if truncation will work
+                for i, idx in enumerate(token_indices):
+                    if idx == 3:  # m)
+                        print(f"   First m) found at position {i}")
+                        break
+                else:
+                    print("   ⚠️  No m) found in VAE output!")
             
             return program_tokens.squeeze(0) if latent_embedding.size(0) == 1 else program_tokens
     
@@ -222,13 +223,6 @@ class DDPGTrainer:
     ) -> Tuple[float, bool, int]:
         """
         Execute a program decoded from latent embedding with improved reward calculation
-        
-        Args:
-            latent_embedding: [64] - latent program embedding
-            karel_world: Karel world instance
-            
-        Returns:
-            Tuple of (reward, success, step_count)
         """
         reward_config = self.config['rewards']
         
@@ -241,6 +235,10 @@ class DDPGTrainer:
             self.logger.debug(f"Latent stats - norm: {np.linalg.norm(latent_np):.3f}, "
                             f"mean: {np.mean(latent_np):.3f}, std: {np.std(latent_np):.3f}")
         
+        # Initialize flags for reward shaping
+        is_executable = False
+        execution_attempted = False
+        
         try:
             # Execute program using DSL executor
             result = self.program_executor.execute_with_dsl(
@@ -249,14 +247,40 @@ class DDPGTrainer:
                 return_traces=False
             )
             
+            # If we get here, the program was at least executable (no parsing errors)
+            execution_attempted = True
+            
             # Extract basic results
             base_reward = result.get('total_reward', 0.0)
             success = result.get('success', False)
             step_count = result.get('action_length', 0)
             error = result.get('error', None)
             
+            # DEBUG: Log the raw result for debugging
+            if np.random.random() < 0.1:  # 10% chance to log
+                program_str = self.tokens.indices_to_string(program_tokens.cpu().numpy().tolist()[:10])
+                self.logger.info(f"DEBUG EXEC: Program='{program_str}', Success={success}, Error='{error}', Steps={step_count}, BaseReward={base_reward}")
+            
+            # Check if program was executable (no parsing/syntax errors)
+            if error is None:
+                is_executable = True
+            elif not any(err_type in str(error).lower() for err_type in ['parse', 'invalid', 'syntax', 'format']):
+                is_executable = True
+            else:
+                is_executable = False
+                
+            # DEBUG: Log executable status
+            if np.random.random() < 0.1:
+                self.logger.info(f"DEBUG REWARD: Executable={is_executable}, Error='{error}'")
+            
             # Calculate shaped reward
             shaped_reward = base_reward
+            
+            # NEW: Reward for executable programs (even if they fail)
+            if is_executable:
+                shaped_reward += reward_config['executable_bonus']
+                if np.random.random() < 0.1:
+                    self.logger.info(f"DEBUG: Applied executable bonus: +{reward_config['executable_bonus']:.3f}")
             
             if success:
                 # Success bonus
@@ -273,23 +297,44 @@ class DDPGTrainer:
                     shaped_reward += reward_config['timeout_penalty']
                 elif error and ('invalid' in str(error).lower() or 'parse' in str(error).lower()):
                     shaped_reward += reward_config['invalid_program_penalty']
+                    is_executable = False  # Override if it's actually a parsing error
+                    if np.random.random() < 0.1:
+                        self.logger.info(f"DEBUG: Applied invalid program penalty: {reward_config['invalid_program_penalty']:.3f}")
                 else:
                     shaped_reward += reward_config['failure_penalty']
+                    if np.random.random() < 0.1:
+                        self.logger.info(f"DEBUG: Applied failure penalty: {reward_config['failure_penalty']:.3f}")
             
             # Step penalty (encourage efficiency)
             shaped_reward += step_count * reward_config['step_penalty']
             
-            # Log execution results occasionally
-            if self.config['debug']['log_program_samples'] and np.random.random() < 0.05:
-                self.logger.debug(f"Execution - Success: {success}, Steps: {step_count}, "
-                                f"Base reward: {base_reward:.3f}, Shaped reward: {shaped_reward:.3f}, "
-                                f"Error: {error}")
+            # DEBUG: Final reward calculation
+            if np.random.random() < 0.1:
+                self.logger.info(f"DEBUG FINAL: BaseReward={base_reward:.3f}, ShapedReward={shaped_reward:.3f}, Components: executable={is_executable}, success={success}")
             
             return shaped_reward, success, step_count
             
         except Exception as e:
-            self.logger.warning(f"Program execution failed: {e}")
-            return reward_config['failure_penalty'], False, 0
+            # DEBUG: Log exception details
+            error_str = str(e).lower()
+            #self.logger.info(f"DEBUG EXCEPTION: {e}, ErrorStr='{error_str}'")
+            
+            if any(err_type in error_str for err_type in ['parse', 'invalid', 'syntax', 'format']):
+                # Parsing/syntax error - program not executable
+                penalty = reward_config['invalid_program_penalty']
+                #self.logger.info(f"DEBUG: Non-executable program penalty: {penalty:.3f}")
+            else:
+                # Other execution error - might still be syntactically correct
+                penalty = reward_config['failure_penalty']
+                # Give executable bonus even if execution failed for other reasons
+                if execution_attempted:
+                    penalty += reward_config['executable_bonus']
+                    #self.logger.info(f"DEBUG: Executable but failed program: {penalty:.3f}")
+                '''else:
+                    self.logger.info(f"DEBUG: Execution failed penalty: {penalty:.3f}")'''
+            
+            #self.logger.warning(f"Program execution failed: {e}")
+            return penalty, False, 0
     
     def train_episode(self, episode_num: int) -> Dict[str, Any]:
         """

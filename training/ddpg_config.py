@@ -22,8 +22,8 @@ DDPG_CONFIG = {
     
     # DDPG Agent parameters
     'ddpg': {
-        'actor_lr': 3e-4,           # Higher learning rate for faster initial learning
-        'critic_lr': 3e-4,          # Match actor lr
+        'actor_lr': 3e-5,           # Higher learning rate for faster initial learning
+        'critic_lr': 3e-5,          # Match actor lr
         'tau': 0.01,                # Faster target network updates
         'gamma': 0.95,              # Slightly lower discount for shorter horizons
         'buffer_size': 50000,       # Smaller buffer for faster cycling
@@ -41,7 +41,7 @@ DDPG_CONFIG = {
     'vae': {
         'latent_scaling': 1.5,      # Scale factor for latent embeddings
         'use_latent_clipping': True,
-        'latent_clip_range': [-3.0, 3.0],  # Wider range for VAE latents
+        'latent_clip_range': [-4.0, 4.0],  # Wider range for VAE latents
         'generation_temperature': 1.0,     # Temperature for program generation
     },
     
@@ -50,10 +50,11 @@ DDPG_CONFIG = {
         'success_bonus': 1.0,       # Bonus for successful program execution
         'step_penalty': -0.001,     # Small penalty per execution step
         'failure_penalty': -0.1,    # Penalty for failed execution (was -0.5)
-        'timeout_penalty': -0.05,   # Penalty for program timeout
-        'invalid_program_penalty': -0.2,  # Penalty for invalid programs
+        'timeout_penalty': -0.01,   # Penalty for program timeout
+        'invalid_program_penalty': -1,  # Penalty for invalid programs
+        'executable_bonus': 0.2,    # NEW: Bonus for syntactically correct/executable programs
         'efficiency_reward': 0.1,   # Reward for shorter successful programs
-        'progress_reward_scale': 0.5,  # Scale factor for intermediate progress
+        'progress_reward_scale': 1.0,  # Scale factor for intermediate progress
     },
     
     # Network architecture
