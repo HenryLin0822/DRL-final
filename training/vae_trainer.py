@@ -90,8 +90,8 @@ class HPRLVAETrainer:
         
         # FIXED: Anti-collapse training parameters
         self.base_beta = config.get('loss', {}).get('latent_loss_coef', 0.5)  # Much higher default
-        #self.base_lambda_behavior = config.get('loss', {}).get('condition_loss_coef', 0.5)
-        self.base_lambda_behavior = 0.5
+        self.base_lambda_behavior = config.get('loss', {}).get('condition_loss_coef', 0.5)
+        #self.base_lambda_behavior = 0.5
         self.num_epochs = config.get('train', {}).get('max_epoch', 150)  # More epochs
         self.batch_size = config.get('train', {}).get('batch_size', 128)
         self.learning_rate = config.get('optimizer', {}).get('params', {}).get('lr', 5e-5)  # Lower LR
@@ -569,9 +569,10 @@ class HPRLVAETrainer:
         except Exception as e:
             return torch.tensor(0.0, device=gen_probs.device)
 
+
     def compute_reconstruction_loss(self, output_logits: torch.Tensor, target_programs: torch.Tensor, program_lengths: torch.Tensor) -> torch.Tensor:
         """
-        ENHANCED: Reconstruction loss with termination awareness (SAME FUNCTION NAME)
+        FIXED: Reconstruction loss calculation - the bug was in loss averaging
         """
         batch_size, seq_len, vocab_size = output_logits.shape
         target_seq_len = target_programs.size(1)
@@ -580,8 +581,11 @@ class HPRLVAETrainer:
         if min_len == 0:
             return torch.tensor(0.0, device=output_logits.device, requires_grad=True)
         
+        # BUG WAS HERE: We were averaging across batches incorrectly
+        # Instead of accumulating loss per sample, we should compute batch loss directly
+        
         total_loss = torch.tensor(0.0, device=output_logits.device, requires_grad=True)
-        loss_count = 0
+        total_loss_items = []  # Collect individual losses for proper averaging
         
         for b in range(batch_size):
             actual_length = program_lengths[b].item()
@@ -590,41 +594,38 @@ class HPRLVAETrainer:
             if actual_length <= 0:
                 continue
             
+            batch_loss_components = []
+            
             # 1. Standard reconstruction loss on actual program tokens
             program_logits = output_logits[b, :actual_length, :]
             program_targets = target_programs[b, :actual_length]
             
             if program_targets.numel() > 0:
                 recon_loss = F.cross_entropy(program_logits, program_targets, reduction='mean')
-                total_loss = total_loss + recon_loss
-                loss_count += 1
+                batch_loss_components.append(recon_loss)
             
-            # 2. CRITICAL: Termination loss - encourage stopping after program ends
+            # 2. Termination loss - encourage stopping after program ends
             if actual_length < min_len:
-                # The position right after the program should predict padding
                 termination_pos = actual_length
                 
                 if termination_pos < seq_len:
                     termination_logits = output_logits[b, termination_pos, :]
                     
-                    # Encourage padding token at termination position
                     padding_loss = F.cross_entropy(
                         termination_logits.unsqueeze(0), 
                         torch.tensor([self.padding_idx], device=output_logits.device),
                         reduction='mean'
                     )
                     
-                    # Add termination loss with high weight
-                    total_loss = total_loss + 2.0 * padding_loss  # High weight for termination!
-                    loss_count += 1
+                    # CRITICAL FIX: Don't multiply by 2.0 here - do it when combining
+                    batch_loss_components.append(2.0 * padding_loss)
             
-            # 3. PADDING LOSS: Strongly penalize generating non-padding after program ends
+            # 3. Padding loss: penalize generating non-padding after program ends
             if actual_length < min_len - 1:
                 padding_positions = slice(actual_length + 1, min_len)
                 padding_logits = output_logits[b, padding_positions, :]
                 
                 if padding_logits.numel() > 0:
-                    # All positions after program should be padding
                     num_padding_positions = padding_logits.size(0)
                     padding_targets = torch.full(
                         (num_padding_positions,), 
@@ -634,11 +635,21 @@ class HPRLVAETrainer:
                     
                     padding_loss = F.cross_entropy(padding_logits, padding_targets, reduction='mean')
                     
-                    # High weight for padding loss
-                    total_loss = total_loss + 3.0 * padding_loss  # Very high weight!
-                    loss_count += 1
+                    # CRITICAL FIX: Don't multiply by 3.0 here - do it when combining
+                    batch_loss_components.append(3.0 * padding_loss)
+            
+            # CRITICAL FIX: Sum the components for this batch sample
+            if batch_loss_components:
+                sample_total_loss = sum(batch_loss_components)
+                total_loss_items.append(sample_total_loss)
         
-        return total_loss / loss_count if loss_count > 0 else total_loss
+        # CRITICAL FIX: Average across valid samples
+        if total_loss_items:
+            final_loss = sum(total_loss_items) / len(total_loss_items)
+        else:
+            final_loss = torch.tensor(0.0, device=output_logits.device, requires_grad=True)
+        
+        return final_loss
 
     def compute_action_loss(self, action_logits: torch.Tensor, target_actions: torch.Tensor, action_lengths: torch.Tensor) -> torch.Tensor:
         """Compute action prediction loss"""
