@@ -90,7 +90,8 @@ class HPRLVAETrainer:
         
         # FIXED: Anti-collapse training parameters
         self.base_beta = config.get('loss', {}).get('latent_loss_coef', 0.5)  # Much higher default
-        self.base_lambda_behavior = config.get('loss', {}).get('condition_loss_coef', 0.0)
+        #self.base_lambda_behavior = config.get('loss', {}).get('condition_loss_coef', 0.5)
+        self.base_lambda_behavior = 0.5
         self.num_epochs = config.get('train', {}).get('max_epoch', 150)  # More epochs
         self.batch_size = config.get('train', {}).get('batch_size', 128)
         self.learning_rate = config.get('optimizer', {}).get('params', {}).get('lr', 5e-5)  # Lower LR
@@ -638,7 +639,25 @@ class HPRLVAETrainer:
                     loss_count += 1
         
         return total_loss / loss_count if loss_count > 0 else total_loss
-    
+
+    def compute_action_loss(self, action_logits: torch.Tensor, target_actions: torch.Tensor, action_lengths: torch.Tensor) -> torch.Tensor:
+        """Compute action prediction loss"""
+        # Transpose action_logits to get [batch_size, num_demos, seq_len-1, num_actions]
+        action_logits_transposed = action_logits.transpose(-2, -1)
+        
+        # Match sequence lengths
+        actual_seq_len = action_logits_transposed.size(2)
+        target_seq_len = target_actions.size(2)
+        min_len = min(actual_seq_len, target_seq_len)
+        
+        action_logits_matched = action_logits_transposed[:, :, :min_len, :]
+        target_actions_matched = target_actions[:, :, :min_len]
+        
+        # Flatten for cross entropy
+        action_logits_flat = action_logits_matched.reshape(-1, action_logits_matched.size(-1))
+        target_actions_flat = target_actions_matched.reshape(-1)
+        
+        return F.cross_entropy(action_logits_flat, target_actions_flat, reduction='mean')
 
     def _monitor_and_enforce_kl(self, losses: Dict[str, torch.Tensor], beta: float, lambda_val: float):
         """CRITICAL: Monitor and enforce minimum KL loss to prevent collapse"""
@@ -1090,8 +1109,8 @@ class HPRLVAETrainer:
         # Load schedules and collapse info if available
         """if 'beta_schedule' in checkpoint:
             self.beta_schedule = checkpoint['beta_schedule']"""
-        if 'lambda_schedule' in checkpoint:
-            self.lambda_schedule = checkpoint['lambda_schedule']
+        """if 'lambda_schedule' in checkpoint:
+            self.lambda_schedule = checkpoint['lambda_schedule']"""
         if 'collapse_warnings' in checkpoint:
             self.collapse_warnings = checkpoint['collapse_warnings']
         if 'kl_collapse_detected' in checkpoint:
