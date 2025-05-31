@@ -242,7 +242,7 @@ class HPRLVAETrainer:
             else:
                 # Maximum for final training
                 beta = min(0.8, self.base_beta)
-            schedule.append(beta*0.07)
+            schedule.append(beta*0.04)
         return schedule
     
     def _create_lambda_schedule(self) -> List[float]:
@@ -383,7 +383,7 @@ class HPRLVAETrainer:
         action_lengths: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
         """
-        ENHANCED forward pass with token-weighted losses
+        IMPROVED forward pass with termination-aware losses (SAME FUNCTION NAME)
         """
         # Get current coefficients from schedules
         current_beta = self.beta_schedule[min(self.current_epoch, len(self.beta_schedule)-1)]
@@ -392,7 +392,7 @@ class HPRLVAETrainer:
         # Use action loss only when lambda > 0
         use_action_loss = current_lambda > 0
         
-        # 1. RECONSTRUCTION TRAINING with token weighting
+        # 1. RECONSTRUCTION TRAINING with termination awareness
         mu, logvar = self.program_vae.vae.encode(programs, program_lengths)
         latent = self.program_vae.vae.reparameterize(mu, logvar)
         
@@ -403,8 +403,8 @@ class HPRLVAETrainer:
             deterministic=False
         )
         
-        # TOKEN-WEIGHTED reconstruction loss
-        recon_loss = self.compute_token_weighted_reconstruction_loss(output_logits, programs, program_lengths)
+        # ENHANCED reconstruction loss with termination awareness
+        recon_loss = self.compute_reconstruction_loss(output_logits, programs, program_lengths)
         kl_loss = self.program_vae.vae.kl_loss(mu, logvar)
         
         total_loss = recon_loss + current_beta * kl_loss
@@ -417,7 +417,7 @@ class HPRLVAETrainer:
             'logvar': logvar
         }
         
-        # 2. ENHANCED GENERATION TRAINING with token weighting
+        # 2. PURE GENERATION TRAINING with termination
         if self.global_step > self.generation_training_start and self.global_step % self.generation_training_frequency == 0:
             batch_size = programs.size(0)
             
@@ -431,8 +431,8 @@ class HPRLVAETrainer:
                 deterministic=False
             )
             
-            # TOKEN-WEIGHTED coherence loss
-            coherence_loss = self.compute_token_weighted_coherence_loss(gen_logits, programs)
+            # ENHANCED coherence loss with termination awareness
+            coherence_loss = self.compute_coherence_loss(gen_logits, programs)
             
             losses['total_loss'] += self.generation_weight * coherence_loss
             losses['generation_loss'] = coherence_loss
@@ -460,77 +460,71 @@ class HPRLVAETrainer:
         
         return losses
 
-    def compute_token_weighted_coherence_loss(self, gen_logits: torch.Tensor, reference_programs: torch.Tensor = None) -> torch.Tensor:
+    def compute_coherence_loss(self, gen_logits: torch.Tensor, reference_programs: torch.Tensor = None) -> torch.Tensor:
         """
-        ENHANCED: Coherence loss that encourages generation of important tokens
+        ENHANCED: Coherence loss with termination awareness (SAME FUNCTION NAME)
         """
         batch_size, seq_len, vocab_size = gen_logits.shape
         device = gen_logits.device
         
-        # Standard diversity loss
+        # Convert to probabilities
         probs = F.softmax(gen_logits, dim=-1)
+        
+        # PRIMARY OBJECTIVE: Encourage diversity to prevent mode collapse
         entropy_per_position = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
         avg_entropy = entropy_per_position.mean()
+        
+        # We want HIGH entropy, so minimize negative entropy
         diversity_loss = -avg_entropy
         
-        # ENCOURAGE IMPORTANT TOKEN GENERATION
-        important_token_bonus = torch.tensor(0.0, device=device)
+        # SECONDARY OBJECTIVE: Encourage proper termination
+        termination_bonus = torch.tensor(0.0, device=device)
         
-        '''# Define important tokens we want to encourage
-        encourage_tokens = {
-            'REPEAT': 0.1,
-            'WHILE': 0.1, 
-            'IF': 0.05,
-            'IFELSE': 0.05,
-            'frontIsClear': 0.03,
-            'markersPresent': 0.03,
-        }'''
-        encourage_tokens = {
-            'REPEAT': 0.03,
-
-        }
+        # Get predicted tokens
+        predicted_tokens = torch.argmax(gen_logits, dim=-1)
         
-        try:
-            # Encourage generation of important tokens
-            for token_str, bonus_weight in encourage_tokens.items():
-                token_id = self.dsl.token2int.get(token_str, None)
-                if token_id is not None and token_id < vocab_size:
-                    # Sum probability of this token across all positions and batches
-                    token_prob_sum = probs[:, :, token_id].sum()
-                    
-                    # Reward higher probability (negative loss)
-                    important_token_bonus += bonus_weight * token_prob_sum
-                    
-        except Exception as e:
-            pass  # Ignore if token mapping fails
-        
-        # PENALIZE NEVER GENERATING IMPORTANT TOKENS
-        token_generation_penalty = torch.tensor(0.0, device=device)
-        
-        try:
-            predicted_tokens = torch.argmax(gen_logits, dim=-1)  # [batch_size, seq_len]
+        # Reward sequences that predict padding (natural termination)
+        for b in range(batch_size):
+            seq_tokens = predicted_tokens[b]
             
-            # Check if any important tokens were generated
-            important_token_ids = []
-            for token_str in ['REPEAT', 'WHILE', 'IF']:
-                token_id = self.dsl.token2int.get(token_str, None)
-                if token_id is not None:
-                    important_token_ids.append(token_id)
+            # Find first padding token (if any)
+            padding_positions = (seq_tokens == self.padding_idx).nonzero(as_tuple=True)[0]
             
-            if important_token_ids:
-                for token_id in important_token_ids:
-                    # Check if this token appears in any generated sequence
-                    token_appears = (predicted_tokens == token_id).any()
+            if len(padding_positions) > 0:
+                first_padding_pos = padding_positions[0].item()
+                
+                # Reward termination if it's not at the very start or very end
+                if 2 <= first_padding_pos < seq_len - 1:
+                    termination_bonus += 0.1  # Small reward for reasonable termination
                     
-                    if not token_appears:
-                        # Small penalty for never generating important tokens
-                        token_generation_penalty += 0.02
-                        
-        except Exception as e:
-            pass
+                    # Extra reward if termination happens at reasonable length (3-8 tokens)
+                    if 3 <= first_padding_pos <= 8:
+                        termination_bonus += 0.05
+            
+            # Small penalty if sequence never terminates (hits max length)
+            else:
+                termination_bonus -= 0.02
         
-        # Combine losses
-        total_loss = diversity_loss - important_token_bonus + token_generation_penalty
+        termination_bonus = termination_bonus / batch_size
+        
+        # OPTIONAL: Light structure encouragement
+        structure_bonus = torch.tensor(0.0, device=device)
+        
+        # Very light encouragement for DEF at start (token 0)
+        if seq_len > 0:
+            def_prob_at_start = probs[:, 0, 0]  # Assuming DEF is token 0
+            structure_bonus += 0.01 * -torch.log(def_prob_at_start + 1e-8).mean()
+        
+        # OPTIONAL: Data-driven structure (if reference programs provided)
+        if reference_programs is not None:
+            try:
+                data_driven_loss = self._compute_data_driven_structure_loss(probs, reference_programs)
+                structure_bonus += 0.05 * data_driven_loss
+            except:
+                pass  # Ignore if fails
+        
+        # Total: diversity + termination + light structure
+        total_loss = diversity_loss - termination_bonus + structure_bonus
         
         return total_loss
 
@@ -574,9 +568,9 @@ class HPRLVAETrainer:
         except Exception as e:
             return torch.tensor(0.0, device=gen_probs.device)
 
-    def compute_token_weighted_reconstruction_loss(self, output_logits: torch.Tensor, target_programs: torch.Tensor, program_lengths: torch.Tensor) -> torch.Tensor:
+    def compute_reconstruction_loss(self, output_logits: torch.Tensor, target_programs: torch.Tensor, program_lengths: torch.Tensor) -> torch.Tensor:
         """
-        ENHANCED: Reconstruction loss with higher weights for rare/important tokens
+        ENHANCED: Reconstruction loss with termination awareness (SAME FUNCTION NAME)
         """
         batch_size, seq_len, vocab_size = output_logits.shape
         target_seq_len = target_programs.size(1)
@@ -584,41 +578,6 @@ class HPRLVAETrainer:
         
         if min_len == 0:
             return torch.tensor(0.0, device=output_logits.device, requires_grad=True)
-        
-        # Define token weights - higher weight for important/rare tokens
-        token_weights = torch.ones(vocab_size, device=output_logits.device)
-        
-        # Define important tokens with higher weights
-        '''  important_tokens = {
-            'REPEAT': 5.0,    # 5x weight
-            'WHILE': 5.0,     # 5x weight  
-            'IF': 3.0,        # 3x weight
-            'IFELSE': 3.0,    # 3x weight
-            'frontIsClear': 2.0,
-            'markersPresent': 2.0,
-            'noMarkersPresent': 2.0,
-            'R=2': 2.0, 'R=3': 2.0, 'R=4': 2.0, 'R=5': 2.0,
-            'c(': 1.5, 'c)': 1.5,  # Condition brackets
-            'w(': 1.5, 'w)': 1.5,  # While brackets
-            'r(': 1.5, 'r)': 1.5,  # Repeat brackets
-            'i(': 1.5, 'i)': 1.5,  # If brackets
-            'e(': 1.5, 'e)': 1.5,  # Else brackets
-        }'''
-        important_tokens = {
-            'REPEAT': 1.2,    # 5x weight
-            'R=2': 1.2, 'R=3': 1.2, 'R=4': 1.2, 'R=5': 1.2,
-            'r(': 1.2, 'r)': 1.2,  # Repeat brackets
-        }
-        # Map token strings to IDs and set weights
-        try:
-            for token_str, weight in important_tokens.items():
-                token_id = self.dsl.token2int.get(token_str, None)
-                if token_id is not None and token_id < vocab_size:
-                    token_weights[token_id] = weight
-                    '''if weight >= 3.0:  # Log high-weight tokens
-                        print(f"High weight token: {token_str} (ID: {token_id}) = {weight}x")'''
-        except Exception as e:
-            print(f"Warning: Could not set token weights: {e}")
         
         total_loss = torch.tensor(0.0, device=output_logits.device, requires_grad=True)
         loss_count = 0
@@ -630,48 +589,41 @@ class HPRLVAETrainer:
             if actual_length <= 0:
                 continue
             
-            # 1. WEIGHTED reconstruction loss on actual program tokens
-            program_logits = output_logits[b, :actual_length, :]  # [actual_length, vocab_size]
-            program_targets = target_programs[b, :actual_length]   # [actual_length]
+            # 1. Standard reconstruction loss on actual program tokens
+            program_logits = output_logits[b, :actual_length, :]
+            program_targets = target_programs[b, :actual_length]
             
             if program_targets.numel() > 0:
-                # Get weights for each target token
-                target_token_weights = token_weights[program_targets]  # [actual_length]
-                
-                # Compute loss for each position
-                position_losses = F.cross_entropy(
-                    program_logits, program_targets, reduction='none'
-                )  # [actual_length]
-                
-                # Apply token-specific weights
-                weighted_losses = position_losses * target_token_weights
-                
-                # Average the weighted losses
-                weighted_recon_loss = weighted_losses.mean()
-                
-                total_loss = total_loss + weighted_recon_loss
+                recon_loss = F.cross_entropy(program_logits, program_targets, reduction='mean')
+                total_loss = total_loss + recon_loss
                 loss_count += 1
             
-            # 2. Keep termination loss (unchanged)
+            # 2. CRITICAL: Termination loss - encourage stopping after program ends
             if actual_length < min_len:
+                # The position right after the program should predict padding
                 termination_pos = actual_length
                 
                 if termination_pos < seq_len:
                     termination_logits = output_logits[b, termination_pos, :]
+                    
+                    # Encourage padding token at termination position
                     padding_loss = F.cross_entropy(
                         termination_logits.unsqueeze(0), 
                         torch.tensor([self.padding_idx], device=output_logits.device),
                         reduction='mean'
                     )
-                    total_loss = total_loss + 2.0 * padding_loss
+                    
+                    # Add termination loss with high weight
+                    total_loss = total_loss + 2.0 * padding_loss  # High weight for termination!
                     loss_count += 1
             
-            # 3. Keep padding loss (unchanged)
+            # 3. PADDING LOSS: Strongly penalize generating non-padding after program ends
             if actual_length < min_len - 1:
                 padding_positions = slice(actual_length + 1, min_len)
                 padding_logits = output_logits[b, padding_positions, :]
                 
                 if padding_logits.numel() > 0:
+                    # All positions after program should be padding
                     num_padding_positions = padding_logits.size(0)
                     padding_targets = torch.full(
                         (num_padding_positions,), 
@@ -680,7 +632,9 @@ class HPRLVAETrainer:
                     )
                     
                     padding_loss = F.cross_entropy(padding_logits, padding_targets, reduction='mean')
-                    total_loss = total_loss + 3.0 * padding_loss
+                    
+                    # High weight for padding loss
+                    total_loss = total_loss + 3.0 * padding_loss  # Very high weight!
                     loss_count += 1
         
         return total_loss / loss_count if loss_count > 0 else total_loss
