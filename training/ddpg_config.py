@@ -22,14 +22,14 @@ DDPG_CONFIG = {
     
     # DDPG Agent parameters
     'ddpg': {
-        'actor_lr': 3e-5,           # Higher learning rate for faster initial learning
-        'critic_lr': 3e-5,          # Match actor lr
+        'actor_lr': 3e-6,           # Higher learning rate for faster initial learning
+        'critic_lr': 3e-6,          # Match actor lr
         'tau': 0.01,                # Faster target network updates
         'gamma': 0.95,              # Slightly lower discount for shorter horizons
         'buffer_size': 50000,       # Smaller buffer for faster cycling
         'batch_size': 32,           # Smaller batch for more frequent updates
-        'noise_std': 0.3,           # Higher initial noise for exploration
-        'noise_decay': 0.999,        # Slower noise decay
+        'noise_std': 0.5,           # Higher initial noise for exploration
+        'noise_decay': 0.9999,        # Slower noise decay
         'noise_min': 0.1,          # Minimum noise to maintain exploration
         'macro_steps': 5,           # |H| = 5 from paper
         'max_program_steps': 50,    # Shorter programs initially
@@ -41,18 +41,18 @@ DDPG_CONFIG = {
     'vae': {
         'latent_scaling': 1.5,      # Scale factor for latent embeddings
         'use_latent_clipping': True,
-        'latent_clip_range': [-4.0, 4.0],  # Wider range for VAE latents
+        'latent_clip_range': [-6.0, 6.0],  # Wider range for VAE latents
         'generation_temperature': 1.0,     # Temperature for program generation
     },
     
     # Reward shaping parameters
     'rewards': {
         'success_bonus': 1.0,       # Bonus for successful program execution
-        'step_penalty': -0.001,     # Small penalty per execution step
-        'failure_penalty': -0.1,    # Penalty for failed execution (was -0.5)
-        'timeout_penalty': -0.01,   # Penalty for program timeout
+        'step_penalty': 0,     # Small penalty per execution step
+        'failure_penalty': 0,    # Penalty for failed execution (was -0.5)
+        'timeout_penalty': 0,   # Penalty for program timeout
         'invalid_program_penalty': -1,  # Penalty for invalid programs
-        'executable_bonus': 0.2,    # NEW: Bonus for syntactically correct/executable programs
+        'executable_bonus': 0,    # NEW: Bonus for syntactically correct/executable programs
         'efficiency_reward': 0.1,   # Reward for shorter successful programs
         'progress_reward_scale': 1.0,  # Scale factor for intermediate progress
     },
@@ -93,13 +93,13 @@ DDPG_CONFIG = {
     # Exploration strategies
     'exploration': {
         'strategy': 'ou_noise',  # 'ou_noise', 'gaussian', 'epsilon_greedy'
-        'ou_theta': 0.15,
+        'ou_theta': 0.05,
         'ou_sigma': 0.2,
         'ou_dt': 1e-2,
-        'gaussian_std': 0.1,
+        'gaussian_std': 0.5,
         'epsilon_start': 1.0,
         'epsilon_end': 0.1,
-        'epsilon_decay': 0.995,
+        'epsilon_decay': 0.9999,
     }
 }
 
