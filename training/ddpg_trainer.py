@@ -229,12 +229,6 @@ class DDPGTrainer:
         # Decode latent to program tokens
         program_tokens = self.latent_to_program_tokens(latent_embedding)
         
-        # Log latent statistics if enabled
-        if self.config['debug']['log_latent_stats'] and np.random.random() < 0.05:
-            latent_np = latent_embedding.cpu().numpy()
-            self.logger.debug(f"Latent stats - norm: {np.linalg.norm(latent_np):.3f}, "
-                            f"mean: {np.mean(latent_np):.3f}, std: {np.std(latent_np):.3f}")
-        
         # Initialize flags for reward shaping
         is_executable = False
         execution_attempted = False
@@ -256,11 +250,6 @@ class DDPGTrainer:
             step_count = result.get('action_length', 0)
             error = result.get('error', None)
             
-            # DEBUG: Log the raw result for debugging
-            if np.random.random() < 0.1:  # 10% chance to log
-                program_str = self.tokens.indices_to_string(program_tokens.cpu().numpy().tolist()[:10])
-                self.logger.info(f"DEBUG EXEC: Program='{program_str}', Success={success}, Error='{error}', Steps={step_count}, BaseReward={base_reward}")
-            
             # Check if program was executable (no parsing/syntax errors)
             if error is None:
                 is_executable = True
@@ -268,19 +257,13 @@ class DDPGTrainer:
                 is_executable = True
             else:
                 is_executable = False
-                
-            # DEBUG: Log executable status
-            if np.random.random() < 0.1:
-                self.logger.info(f"DEBUG REWARD: Executable={is_executable}, Error='{error}'")
             
             # Calculate shaped reward
             shaped_reward = base_reward
             
-            # NEW: Reward for executable programs (even if they fail)
+            # Reward for executable programs (even if they fail)
             if is_executable:
                 shaped_reward += reward_config['executable_bonus']
-                if np.random.random() < 0.1:
-                    self.logger.info(f"DEBUG: Applied executable bonus: +{reward_config['executable_bonus']:.3f}")
             
             if success:
                 # Success bonus
@@ -298,42 +281,39 @@ class DDPGTrainer:
                 elif error and ('invalid' in str(error).lower() or 'parse' in str(error).lower()):
                     shaped_reward += reward_config['invalid_program_penalty']
                     is_executable = False  # Override if it's actually a parsing error
-                    if np.random.random() < 0.1:
-                        self.logger.info(f"DEBUG: Applied invalid program penalty: {reward_config['invalid_program_penalty']:.3f}")
                 else:
                     shaped_reward += reward_config['failure_penalty']
-                    if np.random.random() < 0.1:
-                        self.logger.info(f"DEBUG: Applied failure penalty: {reward_config['failure_penalty']:.3f}")
             
             # Step penalty (encourage efficiency)
             shaped_reward += step_count * reward_config['step_penalty']
             
-            # DEBUG: Final reward calculation
-            if np.random.random() < 0.1:
-                self.logger.info(f"DEBUG FINAL: BaseReward={base_reward:.3f}, ShapedReward={shaped_reward:.3f}, Components: executable={is_executable}, success={success}")
+            # 🔥 LOG PROGRAM AND REWARDS
+            program_str = self.tokens.indices_to_string(program_tokens.cpu().numpy().tolist()[:20])
+            self.logger.info(f"PROGRAM: {program_str} | BASE: {base_reward:.3f} | SHAPED: {shaped_reward:.3f}")
             
             return shaped_reward, success, step_count
             
         except Exception as e:
-            # DEBUG: Log exception details
+            # Handle execution errors
             error_str = str(e).lower()
-            #self.logger.info(f"DEBUG EXCEPTION: {e}, ErrorStr='{error_str}'")
             
             if any(err_type in error_str for err_type in ['parse', 'invalid', 'syntax', 'format']):
                 # Parsing/syntax error - program not executable
                 penalty = reward_config['invalid_program_penalty']
-                #self.logger.info(f"DEBUG: Non-executable program penalty: {penalty:.3f}")
             else:
                 # Other execution error - might still be syntactically correct
                 penalty = reward_config['failure_penalty']
                 # Give executable bonus even if execution failed for other reasons
                 if execution_attempted:
                     penalty += reward_config['executable_bonus']
-                    #self.logger.info(f"DEBUG: Executable but failed program: {penalty:.3f}")
-                '''else:
-                    self.logger.info(f"DEBUG: Execution failed penalty: {penalty:.3f}")'''
             
-            #self.logger.warning(f"Program execution failed: {e}")
+            # 🔥 LOG FAILED PROGRAM
+            try:
+                program_str = self.tokens.indices_to_string(program_tokens.cpu().numpy().tolist()[:20])
+                self.logger.info(f"PROGRAM: {program_str} | BASE: 0.000 | SHAPED: {penalty:.3f} | ERROR: {e}")
+            except:
+                self.logger.info(f"PROGRAM: [DECODE_FAILED] | BASE: 0.000 | SHAPED: {penalty:.3f} | ERROR: {e}")
+            
             return penalty, False, 0
     
     def train_episode(self, episode_num: int) -> Dict[str, Any]:
@@ -353,13 +333,15 @@ class DDPGTrainer:
         episode_reward = 0.0
         episode_steps = 0
         successful_programs = 0
+        total_updates = 0  # Track number of DDPG updates this episode
         
         # Episode statistics
         episode_stats = {
             'macro_rewards': [],
             'program_successes': [],
             'program_lengths': [],
-            'latent_norms': []
+            'latent_norms': [],
+            'ddpg_updates': []  # Track updates per macro step
         }
         
         for macro_step in range(self.macro_steps):
@@ -400,25 +382,32 @@ class DDPGTrainer:
                 current_state, latent_action, macro_reward, next_state, done
             )
             
+            # 🔥 UPDATE DDPG AFTER EACH MACRO STEP (if enough samples)
+            macro_step_updates = 0
+            if (self.current_episode >= self.warmup_episodes and 
+                self.agent.replay_buffer.size() > self.agent.batch_size):
+                
+                training_stats = self.agent.update()
+                macro_step_updates = 1
+                total_updates += 1
+                
+                # Log training statistics
+                for key, value in training_stats.items():
+                    self.training_stats[key].append(value)
+            
+            episode_stats['ddpg_updates'].append(macro_step_updates)
+            
             # Update statistics
             episode_reward += macro_reward
             episode_steps += program_steps
             self.total_steps += 1
             
-            # Update current state
+            # Update current state for next macro step
             current_state = next_state
             
             # Early termination if task is completed
             if karel_world.done:
                 break
-        
-        # Update DDPG agent (only after warmup period)
-        if self.current_episode >= self.warmup_episodes and self.agent.replay_buffer.size() > self.agent.batch_size:
-            training_stats = self.agent.update()
-            
-            # Log training statistics
-            for key, value in training_stats.items():
-                self.training_stats[key].append(value)
         
         # Compile episode results
         episode_results = {
@@ -428,7 +417,9 @@ class DDPGTrainer:
             'success_rate': successful_programs / self.macro_steps,
             'avg_program_length': np.mean(episode_stats['program_lengths']),
             'avg_latent_norm': np.mean(episode_stats['latent_norms']),
-            'macro_rewards': episode_stats['macro_rewards']
+            'macro_rewards': episode_stats['macro_rewards'],
+            'total_ddpg_updates': total_updates,  # New metric
+            'updates_per_macro_step': episode_stats['ddpg_updates']
         }
         
         return episode_results
@@ -504,22 +495,17 @@ class DDPGTrainer:
         log_frequency: int = 10
     ):
         """
-        Main training loop
-        
-        Args:
-            max_episodes: Maximum number of training episodes
-            eval_frequency: How often to run evaluation
-            save_frequency: How often to save checkpoints
-            log_frequency: How often to log progress
+        Main training loop with minimal logging
         """
         self.logger.info(f"Starting DDPG training for {max_episodes} episodes on task '{self.task}'")
-        self.logger.info(f"Device: {self.device}, Macro steps: {self.macro_steps}")
         
         self.agent.train()
         start_time = time.time()
         
         for episode in range(max_episodes):
             self.current_episode = episode
+            
+            self.logger.info(f"\n=== EPISODE {episode} ===")
             
             # Train one episode
             episode_results = self.train_episode(episode)
@@ -533,47 +519,18 @@ class DDPGTrainer:
                 self.best_reward = episode_results['episode_reward']
                 self.save_checkpoint('best_model.pt')
             
-            # Logging
-            if episode % log_frequency == 0:
-                avg_reward = np.mean(list(self.episode_rewards)[-log_frequency:])
-                recent_episodes = self.training_stats.get('episodes', [])[-log_frequency:]
-                avg_success = np.mean([ep['success_rate'] for ep in recent_episodes]) if recent_episodes else 0.0
-                
-                # Additional debug info
-                warmup_status = "WARMUP" if episode < self.warmup_episodes else "TRAINING"
-                buffer_size = self.agent.replay_buffer.size()
-                
-                self.logger.info(
-                    f"Episode {episode:4d} [{warmup_status}] | "
-                    f"Reward: {episode_results['episode_reward']:7.3f} | "
-                    f"Avg Reward: {avg_reward:7.3f} | "
-                    f"Success Rate: {episode_results['success_rate']:5.3f} | "
-                    f"Successful Programs: {episode_results['successful_programs']}/{self.macro_steps} | "
-                    f"Avg Program Length: {episode_results['avg_program_length']:5.1f} | "
-                    f"Buffer Size: {buffer_size:6d} | "
-                    f"Noise Std: {self.agent.noise_std:.4f}"
-                )
-                
-                # Log program samples if enabled
-                if self.config['debug']['log_program_samples'] and episode % (log_frequency * 5) == 0:
-                    self._log_program_samples()
+            # 🔥 LOG EPISODE TOTAL
+            self.logger.info(f"EPISODE {episode} TOTAL REWARD: {episode_results['episode_reward']:.3f}")
             
             # Store episode statistics
             if 'episodes' not in self.training_stats:
                 self.training_stats['episodes'] = []
             self.training_stats['episodes'].append(episode_results)
             
-            # Evaluation
+            # Evaluation (minimal logging)
             if episode % eval_frequency == 0 and episode > 0:
-                self.logger.info(f"Running evaluation at episode {episode}")
                 eval_results = self.evaluate()
-                
-                self.logger.info(
-                    f"Evaluation | "
-                    f"Avg Reward: {eval_results['avg_reward']:7.3f} ± {eval_results['std_reward']:5.3f} | "
-                    f"Avg Success Rate: {eval_results['avg_success_rate']:5.3f} | "
-                    f"Avg Program Length: {eval_results['avg_program_length']:5.1f}"
-                )
+                self.logger.info(f"EVALUATION | Avg Reward: {eval_results['avg_reward']:.3f}")
                 
                 # Store evaluation results
                 if 'evaluations' not in self.training_stats:
@@ -585,24 +542,18 @@ class DDPGTrainer:
             if episode % save_frequency == 0 and episode > 0:
                 self.save_checkpoint(f'episode_{episode}.pt')
                 self.save_training_stats()
-                self.logger.info(f"Checkpoint saved at episode {episode}")
         
-        # Final evaluation and save
-        self.logger.info("Training completed! Running final evaluation...")
+        # Final summary
         final_eval = self.evaluate(num_episodes=50)
+        total_time = time.time() - start_time
         
-        self.logger.info(
-            f"Final Evaluation | "
-            f"Avg Reward: {final_eval['avg_reward']:7.3f} ± {final_eval['std_reward']:5.3f} | "
-            f"Success Rate: {final_eval['avg_success_rate']:5.3f}"
-        )
+        self.logger.info(f"\nTRAINING COMPLETED!")
+        self.logger.info(f"Final Avg Reward: {final_eval['avg_reward']:.3f}")
+        self.logger.info(f"Training Time: {total_time/3600:.2f} hours")
         
-        # Save final model and statistics
+        # Save final model
         self.save_checkpoint('final_model.pt')
         self.save_training_stats()
-        
-        total_time = time.time() - start_time
-        self.logger.info(f"Training completed in {total_time:.2f} seconds ({total_time/3600:.2f} hours)")
     
     def save_checkpoint(self, filename: str):
         """Save training checkpoint"""
